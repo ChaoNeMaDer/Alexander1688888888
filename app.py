@@ -99,20 +99,15 @@ if df_stock is not None and not df_stock.empty:
     is_above_ma20 = latest_close >= ma20
     # 模擬當日三大法人同買狀態 (可更換為實時 API 邏輯)
     institutional_buy_all = True if (latest_close > prev_close and change_pct > 0) else False
-
+# 籌碼訊號與特級警報判斷 (請確保這整個區塊前面都有正確縮排)
     if institutional_buy_all and is_above_ma20:
-    st.success("🔥 **【特級強烈買進訊號】三大法人同步買超 + 站上月線打底！**\n\n外資、投信、自營商共識極高，且股價具備均線支撐，為高勝率佈局點。")
-elif institutional_buy_all:
-    st.info("⚡ **【籌碼轉強警報】三大法人今日同步買超**\n\n主力資金開始卡位，但需注意是否已突破均線反壓。")
-elif is_above_ma20:
-    st.warning("⚠️ **【技術面撐腰】股價站上月線，但籌碼分歧**\n\n法人買賣超未一致，建議等待土洋合心買訊出現再大幅建倉。")
-else:
-    st.error("❄️ **【觀望訊號】籌碼偏空 / 股價回檔修整中**\n\n法人方向不明或賣壓宣洩中，建議暫不接刀，嚴格執行觀察。")
-    # K線走勢圖
-    st.subheader("📊 近期價格走勢與月線")
-    st.line_chart(df_stock[['Close', 'MA20']])
-
-    st.divider()
+        st.success("🔥 **【特級強烈買進訊號】三大法人同步買超 + 站上月線打底！**\n\n外資、投信、自營商共識極高，且股價具備均線支撐，為高勝率佈局點。")
+    elif institutional_buy_all:
+        st.info("⚡ **【籌碼轉強警報】三大法人今日同步買超**\n\n主力資金開始卡位，但需注意是否已突破均線反壓。")
+    elif is_above_ma20:
+        st.warning("⚠️ **【技術面撐腰】股價站上月線，但籌碼分歧**\n\n法人買賣超未一致，建議等待土洋合心買訊出現再大幅建倉。")
+    else:
+        st.error("❄️ **【觀望訊號】籌碼偏空 / 股價回檔修整中**\n\n法人方向不明或賣壓宣洩中，建議暫不接刀，嚴格執行觀察。")
 
     # --- 模擬交易 (Paper Trading) 區塊 ---
     st.subheader("🤖 模擬交易系統 (Paper Trading)")
