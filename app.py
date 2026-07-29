@@ -59,13 +59,19 @@ if reset_btn:
 @st.cache_data(ttl=1800)
 def fetch_stock_data(symbol):
     try:
-        df = yf.download(symbol, period="3m")
+        # 自動處理使用者沒填 .TW 的情況
+        symbol = symbol.strip().upper()
+        if not symbol.endswith(".TW") and not symbol.endswith(".TWO"):
+            symbol = f"{symbol}.TW"
+            
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="3m")
+        
         if df.empty:
             return None
-        # 計算 20日均線 (月線)
+            
+        # 計算 20 日均線 (月線)
         df['MA20'] = df['Close'].rolling(window=20).mean()
-        # 模擬三大法人籌碼數據（註：yfinance無台股籌碼，此處示範籌碼邏輯運算）
-        # 實際可對接 TWSE API 或 FinMind
         df['Volume_MA5'] = df['Volume'].rolling(window=5).mean()
         return df
     except Exception as e:
