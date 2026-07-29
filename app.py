@@ -123,7 +123,7 @@ def fetch_week_trend(stock_code, latest_date_str, trading_days=WEEK_TRADING_DAYS
     return pd.DataFrame(records)
 
 
-def render_week_chart(trend_df, stock_code, stock_name):
+def render_week_chart(trend_df):
     bar_specs = [
         ("外資買賣超(張)", "外資", "#e67e22"),
         ("投信買賣超(張)", "投信", "#3498db"),
@@ -147,11 +147,10 @@ def render_week_chart(trend_df, stock_code, stock_name):
         row=2, col=1
     )
     fig.update_layout(
-        title=f"{stock_name}（{stock_code}）近一週籌碼與股價",
         barmode="group",
-        legend=dict(orientation="h", yanchor="bottom", y=1.08, x=0),
+        legend=dict(orientation="h", yanchor="top", y=-0.15, x=0.5, xanchor="center"),
         height=520,
-        margin=dict(t=90),
+        margin=dict(t=40, b=60),
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -161,7 +160,7 @@ def show_stock_dialog(stock_code, stock_name, latest_date_str):
     st.subheader(f"{stock_name}（{stock_code}）")
     trend_df = fetch_week_trend(stock_code, latest_date_str)
     if len(trend_df) >= 2:
-        render_week_chart(trend_df, stock_code, stock_name)
+        render_week_chart(trend_df)
     else:
         st.warning("近期交易日資料不足，無法繪製曲線圖。")
 
