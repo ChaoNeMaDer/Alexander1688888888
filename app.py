@@ -89,9 +89,9 @@ def fetch_day_data(date_str):
         return None
 
 
-def find_latest_trading_day(max_lookback_days=10):
+def find_trading_day_on_or_before(target_date, max_lookback_days=10):
     for i in range(max_lookback_days):
-        date_str = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
+        date_str = (target_date - timedelta(days=i)).strftime("%Y%m%d")
         day_df = fetch_day_data(date_str)
         if day_df is not None:
             return day_df, date_str
@@ -157,13 +157,19 @@ def show_stock_dialog(stock_code, stock_name, latest_date_str):
 # -----------------------------------------------------------------------------
 st.title("📊 三大法人籌碼戰報")
 
-df, trade_date = find_latest_trading_day()
+st.sidebar.title("⚙️ 篩選設定")
+query_date = st.sidebar.date_input("查詢日期", value=datetime.now(), max_value=datetime.now())
+query_datetime = datetime.combine(query_date, datetime.min.time())
+
+df, trade_date = find_trading_day_on_or_before(query_datetime)
 
 if df is not None:
     display_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-    st.caption(f"資料日期：{display_date}（盤後資料，來源：台灣證券交易所）")
+    if trade_date != query_date.strftime("%Y%m%d"):
+        st.caption(f"資料日期：{display_date}（您選擇的日期非交易日，已自動顯示最近一個交易日資料，來源：台灣證券交易所）")
+    else:
+        st.caption(f"資料日期：{display_date}（盤後資料，來源：台灣證券交易所）")
 
-    st.sidebar.title("⚙️ 篩選設定")
     inst_type = st.sidebar.selectbox(
         "法人別", ["三大法人合計", "外資買賣超", "投信買賣超", "自營商買賣超"]
     )
@@ -178,7 +184,7 @@ if df is not None:
         ]
 
     if "dialog_last_selection" not in st.session_state:
-        st.session_state.dialog_last_selection = None
+        st.session_state.dialog_last_selection = {}
 
     def render_ranking(data, ascending, table_key):
         table = data.sort_values(inst_type, ascending=ascending).head(top_n).copy()
@@ -198,9 +204,9 @@ if df is not None:
         if selected_rows:
             picked = table.iloc[selected_rows[0]]
             code, name = picked["股票代號"], picked["股票名稱"]
-            # 同一列重複觸發 rerun 時不重開視窗，只在選到新股票時才跳窗
-            if (table_key, code) != st.session_state.dialog_last_selection:
-                st.session_state.dialog_last_selection = (table_key, code)
+            # 每個表格各自記錄自己上次選取的股票，避免另一個分頁殘留的選取狀態被誤判為新選取
+            if st.session_state.dialog_last_selection.get(table_key) != code:
+                st.session_state.dialog_last_selection[table_key] = code
                 show_stock_dialog(code, name, trade_date)
 
     st.caption("💡 點選下方表格中的一列，即可跳出該股票近一週的股價與法人買賣超曲線圖")
@@ -212,4 +218,4 @@ if df is not None:
         render_ranking(filtered[filtered[inst_type] < 0], ascending=True, table_key="table_sell")
 
 else:
-    st.error("⚠️ 無法取得三大法人籌碼資料，請稍後再試。")
+    st.error(f"⚠️ 查無 {query_date.strftime('%Y-%m-%d')} 前後的三大法人籌碼資料，請換一個日期再試。")
