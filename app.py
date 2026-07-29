@@ -42,8 +42,9 @@ if 'trade_history' not in st.session_state:
 # 3. 側邊欄控制面板
 # -----------------------------------------------------------------------------
 st.sidebar.title("⚙️ 控制面板")
-raw_stock_id = st.sidebar.text_input("輸入台股代號", value="2367", help="只需要輸入數字即可，例如：2367、2330、3231")
-stock_id = ''.join(filter(str.isdigit, raw_stock_id)) or "2367"
+raw_stock_id = st.sidebar.text_input("輸入台股代號", value="00403A", help="可輸入一般股票或 ETF，例如：2330、0050、00403A")
+# 保留英文字母與數字，並自動清掉空白與轉換為大寫
+stock_id = ''.join(e for e in raw_stock_id if e.isalnum()).upper() or "00403A"
 
 reset_btn = st.sidebar.button("🔄 重置虛擬帳戶 (恢復10萬)")
 if reset_btn:
