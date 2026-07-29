@@ -7,18 +7,18 @@ from datetime import datetime, timedelta
 # 1. 頁面基本設定與 PWA (iOS App) Meta 標籤注入
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="籌碼戰報 PWA",
-    page_icon="📈",
+    page_title="法人籌碼戰報",
+    page_icon="📊",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # 注入 iOS 全螢幕與桌面圖示設定 (PWA Meta Tags)
 pwa_meta_html = """
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="籌碼戰報">
-    <link rel="apple-touch-icon" href="https://em-content.zobj.net/source/apple/391/chart-increasing_1f4c8.png">
+    <meta name="apple-mobile-web-app-title" content="法人籌碼">
+    <link rel="apple-touch-icon" href="https://em-content.zobj.net/source/apple/391/bar-chart_1f4ca.png">
     <style>
         .block-container {
             padding-top: 1.5rem !important;
@@ -28,152 +28,109 @@ pwa_meta_html = """
 """
 st.components.v1.html(pwa_meta_html, height=0)
 
-# -----------------------------------------------------------------------------
-# 2. 模擬帳戶狀態初始化 (Session State)
-# -----------------------------------------------------------------------------
-if 'cash' not in st.session_state:
-    st.session_state.cash = 100000.0  # 預設虛擬本金 10 萬
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = {}  # { stock_id: {'shares': 股數, 'cost': 成本} }
-if 'trade_history' not in st.session_state:
-    st.session_state.trade_history = []
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+
+def to_num(value):
+    return pd.to_numeric(str(value).replace(",", ""), errors="coerce")
+
 
 # -----------------------------------------------------------------------------
-# 3. 側邊欄控制面板
+# 2. 數據抓取：證交所「三大法人買賣超日報」+「每日收盤行情」
+#    找不到當日資料（假日／未開盤）時往前尋找最近一個交易日
 # -----------------------------------------------------------------------------
-st.sidebar.title("⚙️ 控制面板")
-raw_stock_id = st.sidebar.text_input("輸入台股代號", value="00403A", help="可輸入一般股票或 ETF，例如：2330、0050、00403A")
-# 保留英文字母與數字，並自動清掉空白與轉換為大寫
-stock_id = ''.join(e for e in raw_stock_id if e.isalnum()).upper() or "00403A"
+@st.cache_data(ttl=3600)
+def fetch_institutional_chips(max_lookback_days=10):
+    for i in range(max_lookback_days):
+        date_str = (datetime.now() - timedelta(days=i)).strftime("%Y%m%d")
+        try:
+            inst_res = requests.get(
+                f"https://www.twse.com.tw/rwd/zh/fund/T86?response=json&date={date_str}&selectType=ALL",
+                headers=HEADERS, timeout=10
+            )
+            inst_json = inst_res.json()
+            if inst_json.get("stat") != "OK" or not inst_json.get("data"):
+                continue
 
-reset_btn = st.sidebar.button("🔄 重置虛擬帳戶 (恢復10萬)")
-if reset_btn:
-    st.session_state.cash = 100000.0
-    st.session_state.portfolio = {}
-    st.session_state.trade_history = []
-    st.toast("帳戶已重置為 10 萬元！")
-    st.rerun()
+            price_res = requests.get(
+                f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json",
+                headers=HEADERS, timeout=10
+            )
+            price_json = price_res.json()
+            price_table = next(
+                (t for t in price_json.get("tables", []) if "每日收盤行情" in (t.get("title") or "")),
+                None
+            )
+            if not price_table:
+                continue
+
+            inst_df = pd.DataFrame(inst_json["data"], columns=inst_json["fields"])
+            inst_df["外資買賣超"] = (
+                inst_df["外陸資買賣超股數(不含外資自營商)"].map(to_num)
+                + inst_df["外資自營商買賣超股數"].map(to_num)
+            )
+            inst_df["投信買賣超"] = inst_df["投信買賣超股數"].map(to_num)
+            inst_df["自營商買賣超"] = inst_df["自營商買賣超股數"].map(to_num)
+            inst_df["三大法人合計"] = inst_df["三大法人買賣超股數"].map(to_num)
+            inst_df = inst_df.rename(columns={"證券代號": "股票代號", "證券名稱": "股票名稱"})
+            inst_df = inst_df[["股票代號", "股票名稱", "外資買賣超", "投信買賣超", "自營商買賣超", "三大法人合計"]]
+            inst_df["股票名稱"] = inst_df["股票名稱"].str.strip()
+
+            price_df = pd.DataFrame(price_table["data"], columns=price_table["fields"])
+            price_df = price_df.rename(columns={"證券代號": "股票代號"})[["股票代號", "收盤價", "成交股數"]]
+            price_df["收盤價"] = price_df["收盤價"].map(to_num)
+            price_df["成交股數"] = price_df["成交股數"].map(to_num)
+
+            merged = inst_df.merge(price_df, on="股票代號", how="left")
+            # T86 報表含權證等非個股標的，僅保留有實際收盤價／成交量的股票與ETF
+            merged = merged.dropna(subset=["收盤價"]).reset_index(drop=True)
+            return merged, date_str
+        except Exception:
+            continue
+    return None, None
+
 
 # -----------------------------------------------------------------------------
-# 4. 數據抓取：採用 FinMind 免費 API（穩定不擋 IP）
+# 3. 主介面渲染
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=600)
-def fetch_stock_data_finmind(stock_code):
-    try:
-        start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
-        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}"
-        res = requests.get(url, timeout=10)
-        
-        if res.status_code == 200:
-            data = res.json().get('data', [])
-            if data:
-                df = pd.DataFrame(data)
-                df['date'] = pd.to_datetime(df['date'])
-                df.set_index('date', inplace=True)
-                df.rename(columns={'close': 'Close', 'Trading_Volume': 'Volume'}, inplace=True)
-                # 計算 20 日均線 (月線)
-                df['MA20'] = df['Close'].rolling(window=20).mean()
-                return df
-    except Exception:
-        pass
-    return None
+st.title("📊 三大法人籌碼戰報")
 
-df_stock = fetch_stock_data_finmind(stock_id)
+df, trade_date = fetch_institutional_chips()
 
-# -----------------------------------------------------------------------------
-# 5. 主介面渲染
-# -----------------------------------------------------------------------------
-st.title("📈 三大法人籌碼與模擬交易 App")
+if df is not None:
+    display_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+    st.caption(f"資料日期：{display_date}（盤後資料，來源：台灣證券交易所）")
 
-if df_stock is not None and not df_stock.empty and len(df_stock) >= 2:
-    latest_close = float(df_stock['Close'].iloc[-1])
-    prev_close = float(df_stock['Close'].iloc[-2])
-    change_pct = ((latest_close - prev_close) / prev_close) * 100
-    ma20 = float(df_stock['MA20'].iloc[-1]) if not pd.isna(df_stock['MA20'].iloc[-1]) else latest_close
+    st.sidebar.title("⚙️ 篩選設定")
+    inst_type = st.sidebar.selectbox(
+        "法人別", ["三大法人合計", "外資買賣超", "投信買賣超", "自營商買賣超"]
+    )
+    top_n = st.sidebar.selectbox("顯示筆數", [10, 20, 30, 50], index=1)
+    keyword = st.sidebar.text_input("搜尋股票代號／名稱", "")
 
-    # --- 頂部關鍵數據卡片 ---
-    c1, c2, c3 = st.columns(3)
-    c1.metric("標的代號", stock_id)
-    c2.metric("最新收盤價", f"{latest_close:.2f} 元", f"{change_pct:+.2f}%")
-    c3.metric("月線 (20MA)", f"{ma20:.2f} 元", "支撐關卡" if latest_close >= ma20 else "壓力關卡")
+    filtered = df
+    if keyword:
+        filtered = filtered[
+            filtered["股票代號"].str.contains(keyword, case=False, na=False)
+            | filtered["股票名稱"].str.contains(keyword, case=False, na=False)
+        ]
 
-    st.divider()
+    def render_ranking(data, ascending):
+        table = data.sort_values(inst_type, ascending=ascending).head(top_n).copy()
+        table["買賣超(張)"] = (table[inst_type] / 1000).round(0).astype("Int64")
+        table["收盤價"] = table["收盤價"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
+        table["成交量(張)"] = (table["成交股數"] / 1000).round(0).astype("Int64")
+        st.dataframe(
+            table[["股票代號", "股票名稱", "買賣超(張)", "收盤價", "成交量(張)"]],
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    # --- 籌碼訊號與特級警報判斷 ---
-    st.subheader("🚨 三大法人與籌碼警報狀態")
-    
-    is_above_ma20 = latest_close >= ma20
-    # 模擬籌碼訊號邏輯 (當日漲幅 > 0 視為籌碼集中度高)
-    institutional_buy_all = True if (latest_close > prev_close and change_pct > 0) else False
-
-    if institutional_buy_all and is_above_ma20:
-        st.success("🔥 **【特級強烈買進訊號】三大法人同步買超 + 站上月線打底！**\n\n外資、投信、自營商共識極高，且股價具備均線支撐，為高勝率佈局點。")
-    elif institutional_buy_all:
-        st.info("⚡ **【籌碼轉強警報】三大法人今日同步買超**\n\n主力資金開始卡位，但需注意是否已突破均線反壓。")
-    elif is_above_ma20:
-        st.warning("⚠️ **【技術面撐腰】股價站上月線，但籌碼分歧**\n\n法人買賣超未一致，建議等待土洋合心買訊出現再大幅建倉。")
-    else:
-        st.error("❄️ **【觀望訊號】籌碼偏空 / 股價回檔修整中**\n\n法人方向不明或賣壓宣洩中，建議暫不接刀，嚴格執行觀察。")
-
-    # K線走勢圖
-    st.subheader("📊 近期價格走勢與月線")
-    st.line_chart(df_stock[['Close', 'MA20']])
-
-    st.divider()
-
-    # --- 模擬交易 (Paper Trading) 區塊 ---
-    st.subheader("🤖 模擬交易系統 (Paper Trading)")
-
-    curr_shares = st.session_state.portfolio.get(stock_id, {}).get('shares', 0)
-    curr_cost = st.session_state.portfolio.get(stock_id, {}).get('cost', 0.0)
-    market_val = curr_shares * latest_close
-    total_asset = st.session_state.cash + market_val
-
-    col_a, col_b, col_c, col_d = st.columns(4)
-    col_a.metric("可用現金", f"${st.session_state.cash:,.0f}")
-    col_b.metric("目前持股", f"{curr_shares // 1000} 張 ({curr_shares} 股)")
-    col_c.metric("股票市值", f"${market_val:,.0f}")
-    col_d.metric("總虛擬資產", f"${total_asset:,.0f}")
-
-    # 下單按鈕區
-    btn_col1, btn_col2 = st.columns(2)
-    
-    with btn_col1:
-        if st.button("🟢 模擬買入 1 張 (1,000股)", use_container_width=True):
-            cost_total = latest_close * 1000
-            if st.session_state.cash >= cost_total:
-                st.session_state.cash -= cost_total
-                new_shares = curr_shares + 1000
-                new_cost = ((curr_shares * curr_cost) + cost_total) / new_shares
-                st.session_state.portfolio[stock_id] = {'shares': new_shares, 'cost': new_cost}
-                st.session_state.trade_history.append(f"買入 {stock_id} 1張 @ ${latest_close:.2f}")
-                st.toast(f"成功買入 1 張！成本 ${latest_close:.2f}")
-                st.rerun()
-            else:
-                st.error("現金不足以購買 1 張！")
-
-    with btn_col2:
-        if st.button("🔴 模擬賣出 1 張 (1,000股)", use_container_width=True):
-            if curr_shares >= 1000:
-                st.session_state.cash += (latest_close * 1000)
-                new_shares = curr_shares - 1000
-                if new_shares == 0:
-                    del st.session_state.portfolio[stock_id]
-                else:
-                    st.session_state.portfolio[stock_id]['shares'] = new_shares
-                
-                pnl = (latest_close - curr_cost) * 1000
-                st.session_state.trade_history.append(f"賣出 {stock_id} 1張 @ ${latest_close:.2f} (損益: ${pnl:+.0f})")
-                st.toast(f"成功賣出 1 張！交易損益: ${pnl:+.0f}")
-                st.rerun()
-            else:
-                st.error("目前無足夠持股可賣出！")
-
-    # 歷史紀錄
-    if st.session_state.trade_history:
-        with st.expander("📜 查看歷史模擬交易紀錄"):
-            for log in reversed(st.session_state.trade_history):
-                st.write(f"- {log}")
+    tab_buy, tab_sell = st.tabs(["🟢 買超排行", "🔴 賣超排行"])
+    with tab_buy:
+        render_ranking(filtered[filtered[inst_type] > 0], ascending=False)
+    with tab_sell:
+        render_ranking(filtered[filtered[inst_type] < 0], ascending=True)
 
 else:
-    st.error(f"⚠️ 無法取得股票代號【{stock_id}】之歷史數據，請確認輸入無誤。")
+    st.error("⚠️ 無法取得三大法人籌碼資料，請稍後再試。")
