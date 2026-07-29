@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
+import requests
+from datetime import datetime, timedelta
 
 # -----------------------------------------------------------------------------
 # 1. 頁面基本設定與 PWA (iOS App) Meta 標籤注入
@@ -19,7 +20,6 @@ pwa_meta_html = """
     <meta name="apple-mobile-web-app-title" content="籌碼戰報">
     <link rel="apple-touch-icon" href="https://em-content.zobj.net/source/apple/391/chart-increasing_1f4c8.png">
     <style>
-        /* 隱藏預設 Streamlit 頁首頁尾Padding，打造更像 App 的質感 */
         .block-container {
             padding-top: 1.5rem !important;
             padding-bottom: 2rem !important;
@@ -34,18 +34,18 @@ st.components.v1.html(pwa_meta_html, height=0)
 if 'cash' not in st.session_state:
     st.session_state.cash = 100000.0  # 預設虛擬本金 10 萬
 if 'portfolio' not in st.session_state:
-    # 紀錄持股: { stock_id: {'shares': 股數, 'cost': 平均買入成本} }
-    st.session_state.portfolio = {}
+    st.session_state.portfolio = {}  # { stock_id: {'shares': 股數, 'cost': 成本} }
 if 'trade_history' not in st.session_state:
     st.session_state.trade_history = []
 
 # -----------------------------------------------------------------------------
-# 3. 側邊欄控制與參數設定
+# 3. 側邊欄控制面板
 # -----------------------------------------------------------------------------
 st.sidebar.title("⚙️ 控制面板")
-target_stock = st.sidebar.text_input("輸入台股代號", value="2367.TW", help="請輸入 Yahoo Finance 格式，例如：2367.TW, 3481.TW, 3231.TW")
-reset_btn = st.sidebar.button("🔄 重置虛擬帳戶 (恢復10萬)")
+raw_stock_id = st.sidebar.text_input("輸入台股代號", value="2367", help="只需要輸入數字即可，例如：2367、2330、3231")
+stock_id = ''.join(filter(str.isdigit, raw_stock_id)) or "2367"
 
+reset_btn = st.sidebar.button("🔄 重置虛擬帳戶 (恢復10萬)")
 if reset_btn:
     st.session_state.cash = 100000.0
     st.session_state.portfolio = {}
@@ -54,37 +54,37 @@ if reset_btn:
     st.rerun()
 
 # -----------------------------------------------------------------------------
-# 4. 數據抓取與籌碼指標運算
+# 4. 數據抓取：採用 FinMind 免費 API（穩定不擋 IP）
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=1800)
-def fetch_stock_data(symbol):
+@st.cache_data(ttl=600)
+def fetch_stock_data_finmind(stock_code):
     try:
-        # 自動處理使用者沒填 .TW 的情況
-        symbol = symbol.strip().upper()
-        if not symbol.endswith(".TW") and not symbol.endswith(".TWO"):
-            symbol = f"{symbol}.TW"
-            
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period="3m")
+        start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_code}&start_date={start_date}"
+        res = requests.get(url, timeout=10)
         
-        if df.empty:
-            return None
-            
-        # 計算 20 日均線 (月線)
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['Volume_MA5'] = df['Volume'].rolling(window=5).mean()
-        return df
-    except Exception as e:
-        return None
+        if res.status_code == 200:
+            data = res.json().get('data', [])
+            if data:
+                df = pd.DataFrame(data)
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                df.rename(columns={'close': 'Close', 'Trading_Volume': 'Volume'}, inplace=True)
+                # 計算 20 日均線 (月線)
+                df['MA20'] = df['Close'].rolling(window=20).mean()
+                return df
+    except Exception:
+        pass
+    return None
 
-df_stock = fetch_stock_data(target_stock)
+df_stock = fetch_stock_data_finmind(stock_id)
 
 # -----------------------------------------------------------------------------
 # 5. 主介面渲染
 # -----------------------------------------------------------------------------
 st.title("📈 三大法人籌碼與模擬交易 App")
 
-if df_stock is not None and not df_stock.empty:
+if df_stock is not None and not df_stock.empty and len(df_stock) >= 2:
     latest_close = float(df_stock['Close'].iloc[-1])
     prev_close = float(df_stock['Close'].iloc[-2])
     change_pct = ((latest_close - prev_close) / prev_close) * 100
@@ -92,7 +92,7 @@ if df_stock is not None and not df_stock.empty:
 
     # --- 頂部關鍵數據卡片 ---
     c1, c2, c3 = st.columns(3)
-    c1.metric("標的代號", target_stock.replace(".TW", ""))
+    c1.metric("標的代號", stock_id)
     c2.metric("最新收盤價", f"{latest_close:.2f} 元", f"{change_pct:+.2f}%")
     c3.metric("月線 (20MA)", f"{ma20:.2f} 元", "支撐關卡" if latest_close >= ma20 else "壓力關卡")
 
@@ -101,11 +101,10 @@ if df_stock is not None and not df_stock.empty:
     # --- 籌碼訊號與特級警報判斷 ---
     st.subheader("🚨 三大法人與籌碼警報狀態")
     
-    # 模擬籌碼指標邏輯
     is_above_ma20 = latest_close >= ma20
-    # 模擬當日三大法人同買狀態 (可更換為實時 API 邏輯)
+    # 模擬籌碼訊號邏輯 (當日漲幅 > 0 視為籌碼集中度高)
     institutional_buy_all = True if (latest_close > prev_close and change_pct > 0) else False
-# 籌碼訊號與特級警報判斷 (請確保這整個區塊前面都有正確縮排)
+
     if institutional_buy_all and is_above_ma20:
         st.success("🔥 **【特級強烈買進訊號】三大法人同步買超 + 站上月線打底！**\n\n外資、投信、自營商共識極高，且股價具備均線支撐，為高勝率佈局點。")
     elif institutional_buy_all:
@@ -115,12 +114,17 @@ if df_stock is not None and not df_stock.empty:
     else:
         st.error("❄️ **【觀望訊號】籌碼偏空 / 股價回檔修整中**\n\n法人方向不明或賣壓宣洩中，建議暫不接刀，嚴格執行觀察。")
 
+    # K線走勢圖
+    st.subheader("📊 近期價格走勢與月線")
+    st.line_chart(df_stock[['Close', 'MA20']])
+
+    st.divider()
+
     # --- 模擬交易 (Paper Trading) 區塊 ---
     st.subheader("🤖 模擬交易系統 (Paper Trading)")
 
-    # 顯示目前資產狀況
-    curr_shares = st.session_state.portfolio.get(target_stock, {}).get('shares', 0)
-    curr_cost = st.session_state.portfolio.get(target_stock, {}).get('cost', 0.0)
+    curr_shares = st.session_state.portfolio.get(stock_id, {}).get('shares', 0)
+    curr_cost = st.session_state.portfolio.get(stock_id, {}).get('cost', 0.0)
     market_val = curr_shares * latest_close
     total_asset = st.session_state.cash + market_val
 
@@ -140,8 +144,8 @@ if df_stock is not None and not df_stock.empty:
                 st.session_state.cash -= cost_total
                 new_shares = curr_shares + 1000
                 new_cost = ((curr_shares * curr_cost) + cost_total) / new_shares
-                st.session_state.portfolio[target_stock] = {'shares': new_shares, 'cost': new_cost}
-                st.session_state.trade_history.append(f"買入 {target_stock} 1張 @ ${latest_close:.2f}")
+                st.session_state.portfolio[stock_id] = {'shares': new_shares, 'cost': new_cost}
+                st.session_state.trade_history.append(f"買入 {stock_id} 1張 @ ${latest_close:.2f}")
                 st.toast(f"成功買入 1 張！成本 ${latest_close:.2f}")
                 st.rerun()
             else:
@@ -153,22 +157,22 @@ if df_stock is not None and not df_stock.empty:
                 st.session_state.cash += (latest_close * 1000)
                 new_shares = curr_shares - 1000
                 if new_shares == 0:
-                    del st.session_state.portfolio[target_stock]
+                    del st.session_state.portfolio[stock_id]
                 else:
-                    st.session_state.portfolio[target_stock]['shares'] = new_shares
+                    st.session_state.portfolio[stock_id]['shares'] = new_shares
                 
                 pnl = (latest_close - curr_cost) * 1000
-                st.session_state.trade_history.append(f"賣出 {target_stock} 1張 @ ${latest_close:.2f} (損益: ${pnl:+.0f})")
+                st.session_state.trade_history.append(f"賣出 {stock_id} 1張 @ ${latest_close:.2f} (損益: ${pnl:+.0f})")
                 st.toast(f"成功賣出 1 張！交易損益: ${pnl:+.0f}")
                 st.rerun()
             else:
                 st.error("目前無足夠持股可賣出！")
 
-    # 交易履歷
+    # 歷史紀錄
     if st.session_state.trade_history:
         with st.expander("📜 查看歷史模擬交易紀錄"):
             for log in reversed(st.session_state.trade_history):
                 st.write(f"- {log}")
 
 else:
-    st.error("⚠️ 無法取得該股票資料，請確認代號輸入是否正確（台股請加 .TW，例：2367.TW）。")
+    st.error(f"⚠️ 無法取得股票代號【{stock_id}】之歷史數據，請確認輸入無誤。")
