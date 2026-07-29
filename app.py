@@ -112,7 +112,9 @@ def fetch_week_trend(stock_code, latest_date_str, trading_days=WEEK_TRADING_DAYS
             records.append({
                 "日期": f"{date_str[4:6]}/{date_str[6:]}",
                 "收盤價": r["收盤價"],
-                "三大法人合計(張)": r["三大法人合計"] / 1000,
+                "外資買賣超(張)": r["外資買賣超"] / 1000,
+                "投信買賣超(張)": r["投信買賣超"] / 1000,
+                "自營商買賣超(張)": r["自營商買賣超"] / 1000,
             })
         if len(records) >= trading_days:
             break
@@ -121,21 +123,26 @@ def fetch_week_trend(stock_code, latest_date_str, trading_days=WEEK_TRADING_DAYS
 
 
 def render_week_chart(trend_df, stock_code, stock_name):
-    bar_colors = ["#e74c3c" if v >= 0 else "#27ae60" for v in trend_df["三大法人合計(張)"]]
+    bar_specs = [
+        ("外資買賣超(張)", "外資", "#e67e22"),
+        ("投信買賣超(張)", "投信", "#3498db"),
+        ("自營商買賣超(張)", "自營商", "#9b59b6"),
+    ]
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=trend_df["日期"], y=trend_df["三大法人合計(張)"],
-        name="三大法人買賣超(張)", yaxis="y2", marker_color=bar_colors
-    ))
+    for col, label, color in bar_specs:
+        fig.add_trace(go.Bar(
+            x=trend_df["日期"], y=trend_df[col], name=label, yaxis="y2", marker_color=color
+        ))
     fig.add_trace(go.Scatter(
         x=trend_df["日期"], y=trend_df["收盤價"],
-        name="收盤價", yaxis="y", mode="lines+markers", line=dict(color="#2c3e50")
+        name="收盤價", yaxis="y", mode="lines+markers", line=dict(color="#2c3e50", width=3)
     ))
     fig.update_layout(
-        title=f"{stock_name}（{stock_code}）近一週股價與法人買賣超",
+        title=f"{stock_name}（{stock_code}）近一週股價與三大法人買賣超",
         yaxis=dict(title="收盤價"),
         yaxis2=dict(title="買賣超(張)", overlaying="y", side="right"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        barmode="group",
         height=420,
         margin=dict(t=60),
     )
