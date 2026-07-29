@@ -101,22 +101,13 @@ if df_stock is not None and not df_stock.empty:
     institutional_buy_all = True if (latest_close > prev_close and change_pct > 0) else False
 
     if institutional_buy_all and is_above_ma20:
-        st.success("🔥 **【特級強烈買進訊號】三大法人同步買超 + 站上月線打底！**
-
-外資、投信、自營商共識極高，且股價具備均線支撐，為高勝率佈局點。")
-    elif institutional_buy_all:
-        st.info("⚡ **【籌碼轉強警報】三大法人今日同步買超**
-
-主力資金開始卡位，但需注意是否已突破均線反壓。")
-    elif is_above_ma20:
-        st.warning("⚠️ **【技術面撐腰】股價站上月線，但籌碼分歧**
-
-法人買賣超未一致，建議等待土洋合心買訊出現再大幅建倉。")
-    else:
-        st.error("❄️ **【觀望訊號】籌碼偏空 / 股價回檔修整中**
-
-法人方向不明或賣壓宣洩中，建議暫不接刀，嚴格執行觀察。")
-
+    st.success("🔥 **【特級強烈買進訊號】三大法人同步買超 + 站上月線打底！**\n\n外資、投信、自營商共識極高，且股價具備均線支撐，為高勝率佈局點。")
+elif institutional_buy_all:
+    st.info("⚡ **【籌碼轉強警報】三大法人今日同步買超**\n\n主力資金開始卡位，但需注意是否已突破均線反壓。")
+elif is_above_ma20:
+    st.warning("⚠️ **【技術面撐腰】股價站上月線，但籌碼分歧**\n\n法人買賣超未一致，建議等待土洋合心買訊出現再大幅建倉。")
+else:
+    st.error("❄️ **【觀望訊號】籌碼偏空 / 股價回檔修整中**\n\n法人方向不明或賣壓宣洩中，建議暫不接刀，嚴格執行觀察。")
     # K線走勢圖
     st.subheader("📊 近期價格走勢與月線")
     st.line_chart(df_stock[['Close', 'MA20']])
