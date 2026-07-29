@@ -194,6 +194,8 @@ if df is not None:
         st.session_state.dialog_last_selection = {}
 
     def render_ranking(data, ascending, table_key):
+        # key 帶入法人別，切換法人別時視為新表格，自動清除舊的勾選
+        widget_key = f"{table_key}_{inst_type}"
         table = data.sort_values(inst_type, ascending=ascending).head(top_n).copy()
         table["買賣超(張)"] = (table[inst_type] / 1000).round(0).astype("Int64")
         table["收盤價_display"] = table["收盤價"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
@@ -205,15 +207,15 @@ if df is not None:
             hide_index=True,
             on_select="rerun",
             selection_mode="single-row",
-            key=table_key,
+            key=widget_key,
         )
         selected_rows = event.selection.rows if event and event.selection else []
         if selected_rows:
             picked = table.iloc[selected_rows[0]]
             code, name = picked["股票代號"], picked["股票名稱"]
             # 每個表格各自記錄自己上次選取的股票，避免另一個分頁殘留的選取狀態被誤判為新選取
-            if st.session_state.dialog_last_selection.get(table_key) != code:
-                st.session_state.dialog_last_selection[table_key] = code
+            if st.session_state.dialog_last_selection.get(widget_key) != code:
+                st.session_state.dialog_last_selection[widget_key] = code
                 show_stock_dialog(code, name, trade_date)
 
     st.caption("💡 點選下方表格中的一列，即可跳出該股票近一週的股價與法人買賣超曲線圖")
