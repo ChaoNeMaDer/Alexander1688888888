@@ -201,8 +201,8 @@ if df is not None:
         st.session_state.dialog_last_selection = {}
 
     def render_ranking(data, ascending, table_key):
-        # key 帶入法人別，切換法人別時視為新表格，自動清除舊的勾選
-        widget_key = f"{table_key}_{inst_type}"
+        # key 帶入所有篩選條件，任一條件變動就視為新表格，自動清除舊的勾選
+        widget_key = f"{table_key}|{inst_type}|{top_n}|{keyword}|{trade_date}"
         table = data.sort_values(inst_type, ascending=ascending).head(top_n).copy()
         table["買賣超(張)"] = (table[inst_type] / 1000).round(0).astype("Int64")
         table["收盤價_display"] = table["收盤價"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
