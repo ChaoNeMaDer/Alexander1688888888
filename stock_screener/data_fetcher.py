@@ -6,14 +6,11 @@
 import time
 import warnings
 import requests
-import urllib3
 import pandas as pd
 import yfinance as yf
 from tqdm import tqdm
 import config
 
-# 關閉 SSL 警告（部分環境 SSL 憑證問題）
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
@@ -25,7 +22,7 @@ def get_stock_list():
     print("📡 取得上市股票清單...")
     try:
         url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-        resp = requests.get(url, timeout=30, verify=False)
+        resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         for item in resp.json():
             code = item.get("Code", "").strip()
@@ -76,7 +73,7 @@ def get_stock_list():
     tpex_count = 0
     try:
         url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
-        resp = requests.get(url, timeout=30, verify=False)
+        resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         for item in resp.json():
             code = item.get("SecuritiesCompanyCode", "").strip()
@@ -122,9 +119,9 @@ def get_stock_list():
     return stocks
 
 
-def download_historical(tickers, period=None):
+def download_historical(tickers, period=None, max_retries=3):
     """
-    分批下載歷史日K數據。
+    分批下載歷史日K數據，失敗批次會重試（最多 max_retries 次，間隔遞增）。
     回傳 dict: { ticker: DataFrame(Open,High,Low,Close,Volume) }
     """
     if period is None:
@@ -137,49 +134,63 @@ def download_historical(tickers, period=None):
     print(f"📥 下載歷史數據... ({len(tickers)} 檔, {len(batches)} 批)")
 
     for batch_idx, batch in enumerate(tqdm(batches, desc="下載進度")):
-        try:
-            data = yf.download(
-                tickers=batch,
-                period=period,
-                interval="1d",
-                group_by="ticker",
-                threads=True,
-                progress=False,
-                auto_adjust=True,
-            )
+        data = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                data = yf.download(
+                    tickers=batch,
+                    period=period,
+                    interval="1d",
+                    group_by="ticker",
+                    threads=True,
+                    progress=False,
+                    auto_adjust=True,
+                )
+                if data is not None and not data.empty:
+                    break
+            except Exception as e:
+                tqdm.write(f"  ⚠️ 批次 {batch_idx + 1} 第 {attempt}/{max_retries} 次嘗試失敗: {e}")
+            if attempt < max_retries:
+                time.sleep(config.DOWNLOAD_DELAY * attempt)
 
-            if data is None or data.empty:
-                continue
-
-            if len(batch) == 1:
-                ticker = batch[0]
+        if data is None or data.empty:
+            tqdm.write(f"  ❌ 批次 {batch_idx + 1} 重試 {max_retries} 次後仍無資料，略過本批: {batch}")
+        elif len(batch) == 1:
+            ticker = batch[0]
+            try:
+                df = data[["Open", "High", "Low", "Close", "Volume"]].dropna()
+                if len(df) > 0:
+                    all_data[ticker] = df
+            except KeyError:
+                pass
+        else:
+            for ticker in batch:
                 try:
-                    df = data[["Open", "High", "Low", "Close", "Volume"]].dropna()
+                    df = data[ticker][["Open", "High", "Low", "Close", "Volume"]].dropna()
                     if len(df) > 0:
                         all_data[ticker] = df
-                except KeyError:
-                    pass
-            else:
-                for ticker in batch:
-                    try:
-                        df = data[ticker][["Open", "High", "Low", "Close", "Volume"]].dropna()
-                        if len(df) > 0:
-                            all_data[ticker] = df
-                    except (KeyError, TypeError):
-                        continue
-
-        except Exception as e:
-            tqdm.write(f"  ⚠️ 批次 {batch_idx + 1} 錯誤: {e}")
+                except (KeyError, TypeError):
+                    continue
 
         if batch_idx < len(batches) - 1:
             time.sleep(config.DOWNLOAD_DELAY)
 
-    print(f"✅ 成功下載 {len(all_data)} 檔股票數據\n")
+    print(f"✅ 成功下載 {len(all_data)} 檔股票數據")
+    missing = sorted(set(tickers) - set(all_data.keys()))
+    if missing:
+        preview = missing[:20]
+        suffix = f" ...（共 {len(missing)} 檔）" if len(missing) > 20 else ""
+        print(f"⚠️ {len(missing)} 檔未取得歷史數據: {preview}{suffix}")
+    print()
     return all_data
 
 
 def resample_to_weekly(daily_df):
-    """將日K數據重新取樣為週K"""
+    """
+    將日K數據重新取樣為週K。
+    若最後一筆日K的星期不是週五，代表本週交易日尚未走完，
+    該週的週K只用了部分交易日、不算收完，捨棄最後一筆避免誤判。
+    """
     weekly = daily_df.resample("W-FRI").agg({
         "Open": "first",
         "High": "max",
@@ -187,6 +198,8 @@ def resample_to_weekly(daily_df):
         "Close": "last",
         "Volume": "sum",
     }).dropna()
+    if len(weekly) > 0 and daily_df.index[-1].weekday() != 4:
+        weekly = weekly.iloc[:-1]
     return weekly
 
 

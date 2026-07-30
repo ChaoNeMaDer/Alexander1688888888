@@ -193,6 +193,10 @@ def calc_signal_and_trend(df, ma_periods, pivot_len, gap_pct, converge_pct,
         # 交替過濾
         bf = buySig and _lastSig != 1
         sf = sellSig and _lastSig != -1
+        if bf and sf:
+            # 同一根K棒買進、賣出條件同時成立，訊號互相矛盾，兩者都不採信、狀態維持不變
+            bf = False
+            sf = False
         if bf:
             _lastSig = 1
         if sf:

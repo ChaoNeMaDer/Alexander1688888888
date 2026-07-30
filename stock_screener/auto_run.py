@@ -6,6 +6,7 @@
 import os
 import sys
 import json
+import glob
 import logging
 from datetime import datetime
 
@@ -21,6 +22,22 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     encoding="utf-8",
 )
+
+def cleanup_old_reports(output_dir, keep_date_str):
+    """
+    只保留今天的報表，刪除其他日期的舊報表。
+    Web 介面（pages/2_箱波均戰法選股.py）只讀取最新一份 JSON，
+    不需要保留歷史報表；每天都 commit 進 repo 會讓 repo 體積無限增長。
+    """
+    for pattern in ("report_*.html", "report_*.xlsx", "results_*.json"):
+        for path in glob.glob(os.path.join(output_dir, pattern)):
+            if keep_date_str not in os.path.basename(path):
+                try:
+                    os.remove(path)
+                    logging.info(f"已刪除舊報表: {path}")
+                except OSError as e:
+                    logging.warning(f"刪除舊報表失敗: {path} ({e})")
+
 
 def main():
     logging.info("=" * 50)
@@ -114,6 +131,7 @@ def main():
 
             except Exception as e:
                 skipped += 1
+                logging.warning(f"{ticker} 掃描時發生錯誤，已略過: {e}")
                 continue
 
         logging.info(f"掃描完成: 符合 {len(results)} 檔, 跳過 {skipped} 檔")
@@ -146,6 +164,9 @@ def main():
                 ensure_ascii=False,
             )
         logging.info(f"JSON 結果已儲存: {json_path}")
+
+        # ── Step 7: 清除舊報表，避免每天累積導致 repo 體積無限增長 ──
+        cleanup_old_reports(output_dir, date_str)
 
         logging.info("自動選股排程執行完成 ✅")
 

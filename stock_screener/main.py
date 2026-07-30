@@ -115,6 +115,7 @@ def main():
 
         except Exception as e:
             skipped += 1
+            tqdm.write(f"  ⚠️ {ticker} 掃描時發生錯誤，已略過: {e}")
             continue
 
     # ── Step 4: 產生報表 ──
