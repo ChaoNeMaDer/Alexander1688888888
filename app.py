@@ -32,6 +32,7 @@ st.components.v1.html(pwa_meta_html, height=0)
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 WEEK_TRADING_DAYS = 5
+SESSION = requests.Session()
 
 
 def to_num(value):
@@ -45,7 +46,7 @@ def to_num(value):
 @st.cache_data(ttl=3600)
 def fetch_day_data(date_str):
     try:
-        inst_res = requests.get(
+        inst_res = SESSION.get(
             f"https://www.twse.com.tw/rwd/zh/fund/T86?response=json&date={date_str}&selectType=ALL",
             headers=HEADERS, timeout=10
         )
@@ -53,7 +54,7 @@ def fetch_day_data(date_str):
         if inst_json.get("stat") != "OK" or not inst_json.get("data"):
             return None
 
-        price_res = requests.get(
+        price_res = SESSION.get(
             f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json",
             headers=HEADERS, timeout=10
         )
@@ -90,10 +91,9 @@ def fetch_day_data(date_str):
         return None
 
 
-@st.cache_data(ttl=3600)
-def fetch_market_overview(date_str):
+def _fetch_market_overview_uncached(date_str):
     try:
-        index_res = requests.get(
+        index_res = SESSION.get(
             f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json",
             headers=HEADERS, timeout=10
         )
@@ -116,7 +116,7 @@ def fetch_market_overview(date_str):
                 }
                 break
 
-        margin_res = requests.get(
+        margin_res = SESSION.get(
             f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={date_str}&selectType=ALL&response=json",
             headers=HEADERS, timeout=10
         )
@@ -133,7 +133,7 @@ def fetch_market_overview(date_str):
                     margin_balance = to_num(row[fields.index("今日餘額")]) * 1000  # 仟元 -> 元
                     break
 
-        inst_res = requests.get(
+        inst_res = SESSION.get(
             f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?response=json&dayDate={date_str}&type=day",
             headers=HEADERS, timeout=10
         )
@@ -155,10 +155,73 @@ def fetch_market_overview(date_str):
         return None
 
 
+@st.cache_data(ttl=3600)
+def fetch_market_overview(date_str):
+    return _fetch_market_overview_uncached(date_str)
+
+
+@st.cache_data(ttl=3600)
+def fetch_overview_history(latest_date_str, trading_days=20, max_lookback_days=32):
+    base_date = datetime.strptime(latest_date_str, "%Y%m%d")
+    date_strs = [(base_date - timedelta(days=i)).strftime("%Y%m%d") for i in range(max_lookback_days)]
+
+    records = []
+    for date_str in date_strs:
+        day_overview = _fetch_market_overview_uncached(date_str)
+        if day_overview is None or day_overview["margin_balance"] is None or not day_overview["institutional"]:
+            continue
+        inst = day_overview["institutional"]
+        records.append({
+            "日期": date_str,
+            "外資": inst.get("外資"),
+            "投信": inst.get("投信"),
+            "自營商": inst.get("自營商"),
+            "合計": inst.get("合計"),
+            "融資餘額": day_overview["margin_balance"],
+        })
+        if len(records) >= trading_days:
+            break
+    records.reverse()
+    return pd.DataFrame(records)
+
+
+def detect_anomalies(history_df, z_threshold=2.0):
+    if history_df is None or len(history_df) < 6:
+        return []
+    anomalies = []
+    today = history_df.iloc[-1]
+    baseline = history_df.iloc[:-1]
+
+    for col, label in [("外資", "外資"), ("投信", "投信"), ("自營商", "自營商"), ("合計", "三大法人合計")]:
+        mean, std = baseline[col].mean(), baseline[col].std()
+        if std and std > 0:
+            z = (today[col] - mean) / std
+            if abs(z) >= z_threshold:
+                direction = "買超" if today[col] >= 0 else "賣超"
+                anomalies.append(
+                    f"**{label}{direction}金額異常** — 今日 {today[col] / 1e8:+.2f} 億元，"
+                    f"明顯偏離近{len(baseline)}日均值（{mean / 1e8:+.2f} 億元），z-score={z:+.1f}"
+                )
+
+    margin_diff = history_df["融資餘額"].diff().dropna()
+    if len(margin_diff) >= 6:
+        today_diff, baseline_diff = margin_diff.iloc[-1], margin_diff.iloc[:-1]
+        mean, std = baseline_diff.mean(), baseline_diff.std()
+        if std and std > 0:
+            z = (today_diff - mean) / std
+            if abs(z) >= z_threshold:
+                direction = "增加" if today_diff >= 0 else "減少"
+                anomalies.append(
+                    f"**融資餘額單日{direction}異常** — 單日變動 {today_diff / 1e8:+.2f} 億元，"
+                    f"明顯偏離近期平均，z-score={z:+.1f}"
+                )
+    return anomalies
+
+
 @st.cache_data(ttl=10)
 def fetch_realtime_taiex():
     try:
-        res = requests.get(
+        res = SESSION.get(
             "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw",
             headers=HEADERS, timeout=5
         )
@@ -373,6 +436,16 @@ if df is not None:
             st.info("查無三大法人買賣金額資料")
 
     render_market_overview()
+
+    st.subheader("⚠️ 異常摘要")
+    with st.spinner("正在比對近期資料..."):
+        history_df = fetch_overview_history(trade_date)
+    anomalies = detect_anomalies(history_df)
+    if anomalies:
+        for a in anomalies:
+            st.warning(a)
+    else:
+        st.caption(f"近{max(len(history_df) - 1, 0)}日比對下，目前無明顯偏離常態的訊號")
 
     st.divider()
 
