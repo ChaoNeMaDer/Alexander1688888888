@@ -301,17 +301,14 @@ if df is not None:
     @st.fragment(run_every=10 if is_today else None)
     def render_taiex_tile():
         realtime = fetch_realtime_taiex() if is_today else None
-        if realtime:
+        if realtime and realtime["已開盤"]:
             st.metric(
                 "大盤指數（即時，約5秒延遲）",
                 f"{realtime['收盤指數']:,.2f}",
                 delta=f"{realtime['漲跌點數']:+,.2f} 點（{realtime['漲跌百分比']:+.2f}%）",
                 delta_color="inverse",
             )
-            if not realtime["已開盤"]:
-                st.caption("尚未開盤，顯示為前一交易日收盤價")
-            else:
-                st.caption(f"更新時間：{realtime['時間']}")
+            st.caption(f"更新時間：{realtime['時間']}")
         elif overview and overview["taiex"]:
             taiex = overview["taiex"]
             st.metric(
@@ -320,6 +317,8 @@ if df is not None:
                 delta=f"{taiex['漲跌點數']:+,.2f} 點（{taiex['漲跌百分比']:+.2f}%）",
                 delta_color="inverse",
             )
+            if is_today:
+                st.caption("尚未開盤，顯示為前一交易日收盤價與漲跌")
         else:
             st.metric("大盤指數（加權指數）", "查無資料")
 
