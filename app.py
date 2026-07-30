@@ -185,7 +185,23 @@ def fetch_overview_history(latest_date_str, trading_days=20, max_lookback_days=3
     return pd.DataFrame(records)
 
 
-def detect_anomalies(history_df, z_threshold=2.0):
+def _compute_streak(series, min_days):
+    if series is None or len(series) < min_days:
+        return None
+    values = list(series.iloc[::-1])
+    sign = 1 if values[0] >= 0 else -1
+    streak = 0
+    for v in values:
+        if (v >= 0) == (sign == 1):
+            streak += 1
+        else:
+            break
+    if streak < min_days:
+        return None
+    return {"sign": sign, "streak": streak, "total": sum(values[:streak])}
+
+
+def detect_anomalies(history_df, z_threshold=2.0, streak_min_days=3):
     if history_df is None or len(history_df) < 6:
         return []
     anomalies = []
@@ -234,6 +250,32 @@ def detect_anomalies(history_df, z_threshold=2.0):
                         f"明顯偏離近期平均，z-score={z:+.1f}"
                     ),
                 })
+
+    for col, label in [("外資", "外資"), ("投信", "投信"), ("自營商", "自營商"), ("合計", "三大法人合計")]:
+        s = _compute_streak(history_df[col], streak_min_days)
+        if s:
+            direction = "買超" if s["sign"] >= 0 else "賣超"
+            anomalies.append({
+                "type": "streak_institutional",
+                "entity": label,
+                "direction": direction,
+                "streak": s["streak"],
+                "total": s["total"],
+                "label": f"{label}連續{s['streak']}日{direction}",
+                "summary": f"已連續 {s['streak']} 個交易日{direction}，合計 {s['total'] / 1e8:+.2f} 億元",
+            })
+
+    s = _compute_streak(margin_diff, streak_min_days)
+    if s:
+        direction = "增加" if s["sign"] >= 0 else "減少"
+        anomalies.append({
+            "type": "streak_margin",
+            "direction": direction,
+            "streak": s["streak"],
+            "total": s["total"],
+            "label": f"融資餘額連續{s['streak']}日{direction}",
+            "summary": f"已連續 {s['streak']} 個交易日{direction}，合計變動 {s['total'] / 1e8:+.2f} 億元",
+        })
     return anomalies
 
 
@@ -311,14 +353,71 @@ def explain_margin(a, index_change, inst_net):
     return "\n\n".join(lines)
 
 
+def explain_streak_institutional(a, index_change, inst_net):
+    entity, direction = a["entity"], a["direction"]
+    entity_def = {
+        "外資": "外資（含外國機構投資人與陸資）",
+        "投信": "國內投信基金",
+        "自營商": "證券自營商（用公司自有資金操作）",
+        "三大法人合計": "外資、投信、自營商三者加總",
+    }.get(entity, entity)
+
+    lines = [
+        f"**{entity}是什麼** {entity_def}。",
+        (
+            f"**今天發生了什麼** {entity}已經連續 {a['streak']} 個交易日{direction}，"
+            f"合計 {a['total'] / 1e8:+.2f} 億元，代表這不是單日的偶發操作，而是持續一段時間的方向。"
+        ),
+    ]
+    if direction == "買超":
+        lines.append("**可能成因** 對後市偏樂觀、逢低分批加碼，或特定產業／政策題材帶動的中期布局。")
+    else:
+        lines.append("**可能成因** 對後市轉為保守、分批調節持股，或特定產業基本面轉弱引發的持續調節。")
+
+    context = _describe_context(index_change, inst_net if entity != "三大法人合計" else None)
+    if context:
+        lines.append(f"**同一天的其他訊號** {'、'.join(context)}。")
+
+    lines.append("**對決策的意義** 連續多日同方向，比單日數字更有持續性，通常值得留意是否會延續成一段趨勢；但也要留意何時出現方向反轉（例如轉買為賣），這往往是趨勢可能結束的訊號。")
+    return "\n\n".join(lines)
+
+
+def explain_streak_margin(a, index_change, inst_net):
+    direction = a["direction"]
+    lines = [
+        "**融資餘額是什麼** 融資＝投資人跟券商借錢買股票（放大槓桿）。融資餘額就是全市場「借錢買股票、還沒還」的總金額，是散戶槓桿／投機情緒的指標。",
+        (
+            f"**今天發生了什麼** 融資餘額已經連續 {a['streak']} 個交易日{direction}，"
+            f"合計變動 {a['total'] / 1e8:+.2f} 億元，代表槓桿部位正在持續同方向變化，不是單日雜訊。"
+        ),
+    ]
+    if direction == "減少":
+        lines.append("**可能成因** 股價持續下跌、融資戶陸續被追繳／斷頭，也可能是投資人主動、有紀律地連日去槓桿。")
+    else:
+        lines.append("**可能成因** 股價持續上漲、投資人持續加碼追價，槓桿部位持續堆高。")
+
+    context = _describe_context(index_change, inst_net)
+    if context:
+        lines.append(f"**同一天的其他訊號** {'、'.join(context)}。")
+
+    if direction == "減少":
+        lines.append("**對決策的意義** 連續多日去槓桿如果伴隨股價落底、跌勢趨緩，通常代表浮額出清接近尾聲；但如果股價持續破底，代表去槓桿壓力可能還沒完全反映完。")
+    else:
+        lines.append("**對決策的意義** 連續多日槓桿堆高，代表市場追價情緒濃厚；一旦出現轉弱訊號，回檔時容易因為集中的融資部位而放大賣壓，需留意風險。")
+    return "\n\n".join(lines)
+
+
 @st.dialog("📊 異常訊號解析")
 def show_anomaly_dialog(anomaly, index_change, inst_net):
     st.subheader(anomaly["label"])
     st.caption(anomaly["summary"])
-    if anomaly["type"] == "institutional":
-        st.markdown(explain_institutional(anomaly, index_change, inst_net))
-    else:
-        st.markdown(explain_margin(anomaly, index_change, inst_net))
+    explainers = {
+        "institutional": explain_institutional,
+        "margin": explain_margin,
+        "streak_institutional": explain_streak_institutional,
+        "streak_margin": explain_streak_margin,
+    }
+    st.markdown(explainers[anomaly["type"]](anomaly, index_change, inst_net))
 
 
 @st.cache_data(ttl=10)
@@ -365,7 +464,7 @@ def render_stat_tile(label, amount_ntd):
     )
 
 
-def render_market_signal(index_change, inst_net_ntd):
+def render_market_signal(index_change, inst_net_ntd, anomalies=None):
     if index_change is None or inst_net_ntd is None:
         return
     index_up = index_change >= 0
@@ -378,12 +477,26 @@ def render_market_signal(index_change, inst_net_ntd):
         color, label, desc = "#f08c00", "上漲但法人賣超", "指數上漲，三大法人卻賣超，留意上漲力道是否穩固"
     else:
         color, label, desc = "#f08c00", "下跌但法人買超", "指數下跌，三大法人卻買超，留意是否醞釀反彈"
+
+    watch_html = ""
+    if anomalies:
+        items = "".join(f"<li>{a['label']}</li>" for a in anomalies[:4])
+        watch_html = f"""
+        <div style="margin-top:0.5rem; padding-top:0.5rem; border-top:1px solid rgba(128,128,128,0.25);">
+            <span style="font-size:0.85rem; color:gray;">📋 今日應注意事項：</span>
+            <ul style="margin:0.25rem 0 0 1.2rem; padding:0; font-size:0.85rem; color:gray;">
+                {items}
+            </ul>
+        </div>
+        """
+
     st.markdown(
         f"""
         <div style="border-left:6px solid {color}; background:rgba(128,128,128,0.08);
                     padding:0.75rem 1rem; border-radius:6px; margin-bottom:1rem;">
             <span style="font-size:1.15rem; font-weight:700; color:{color};">🚦 {label}</span>
             <span style="font-size:0.9rem; color:gray; margin-left:0.6rem;">{desc}</span>
+            {watch_html}
         </div>
         """,
         unsafe_allow_html=True,
@@ -497,7 +610,12 @@ if df is not None:
         # 盤中不能拿當下的即時指數去配前一個交易日的法人資料，否則兩者根本不是同一天的事。
         trade_date_index_change = overview["taiex"]["漲跌點數"] if overview and overview["taiex"] else None
         inst_net = overview["institutional"].get("合計") if overview and overview["institutional"] else None
-        render_market_signal(trade_date_index_change, inst_net)
+
+        with st.spinner("正在比對近期資料..."):
+            history_df = fetch_overview_history(trade_date)
+        anomalies = detect_anomalies(history_df)
+
+        render_market_signal(trade_date_index_change, inst_net, anomalies)
         if is_today and realtime and realtime["已開盤"]:
             st.caption(f"🚦 訊號依 {display_date}（最近一個完整交易日）資料判讀，三大法人統計需等收盤後公布")
 
@@ -539,9 +657,6 @@ if df is not None:
             st.info("查無三大法人買賣金額資料")
 
         st.subheader("⚠️ 異常摘要")
-        with st.spinner("正在比對近期資料..."):
-            history_df = fetch_overview_history(trade_date)
-        anomalies = detect_anomalies(history_df)
         if anomalies:
             for i, a in enumerate(anomalies):
                 with st.container(border=True):
