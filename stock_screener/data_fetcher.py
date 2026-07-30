@@ -1,10 +1,11 @@
 """
 資料擷取模組
-- 從 TWSE/TPEx API 取得股票清單與當日行情
+- 從 TWSE API 取得上市股票清單、當日行情與三大法人買賣超
 - 使用 yfinance 下載歷史數據
 """
 import time
 import warnings
+from datetime import datetime, timedelta
 import requests
 import pandas as pd
 import yfinance as yf
@@ -15,7 +16,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 def get_stock_list():
-    """從證交所/櫃買中心 API 取得所有個股（排除 ETF），篩選成交量與股價範圍"""
+    """從證交所 API 取得上市個股（排除 ETF），篩選成交量與股價範圍。只掃上市，不含上櫃(TPEx)。"""
     stocks = []
 
     # ── 上市股票 (TWSE) ──
@@ -67,56 +68,53 @@ def get_stock_list():
 
     twse_count = len(stocks)
     print(f"  ✅ 上市股票: {twse_count} 檔通過篩選")
-
-    # ── 上櫃股票 (TPEx) ──
-    print("📡 取得上櫃股票清單...")
-    tpex_count = 0
-    try:
-        url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        for item in resp.json():
-            code = item.get("SecuritiesCompanyCode", "").strip()
-            name = item.get("CompanyName", "").strip()
-            vol_str = item.get("TradingShares", "0").replace(",", "")
-            close_str = item.get("Close", "0").replace(",", "")
-            open_str = item.get("Open", "0").replace(",", "")
-
-            if not (len(code) == 4 and code.isdigit()):
-                continue
-            if code.startswith("00"):
-                continue
-
-            try:
-                volume = int(float(vol_str))
-                close_p = _safe_float(close_str)
-                open_p = _safe_float(open_str)
-            except (ValueError, TypeError):
-                continue
-
-            if volume < config.MIN_VOLUME_SHARES:
-                continue
-            if close_p <= 0:
-                continue
-            if close_p > config.MAX_PRICE:
-                continue
-
-            tpex_count += 1
-            stocks.append({
-                "code": code,
-                "name": name,
-                "market": "TPEx",
-                "ticker": f"{code}.TWO",
-                "volume": volume,
-                "close": close_p,
-                "open": open_p,
-            })
-    except Exception as e:
-        print(f"  ⚠️ TPEx API 錯誤: {e}")
-
-    print(f"  ✅ 上櫃股票: {tpex_count} 檔通過篩選")
     print(f"📊 合計: {len(stocks)} 檔股票待掃描\n")
     return stocks
+
+
+def fetch_institutional_flows(max_lookback_days=5):
+    """
+    抓 TWSE 三大法人買賣超日報（T86），全市場一天只需一次 API 呼叫。
+    自動往前找最近一個有資料的交易日（今天若尚未收盤/未公布則往前找）。
+    只涵蓋上市（TWSE）股票，回傳 (flows, date_str)：
+        flows: { 股票代號: {foreign_net, trust_net, dealer_net, total_net} }（單位：股）
+        date_str: 實際取得資料的日期 (YYYYMMDD)，找不到則為 None
+    """
+    base_date = datetime.now()
+    for i in range(max_lookback_days):
+        date_str = (base_date - timedelta(days=i)).strftime("%Y%m%d")
+        try:
+            resp = requests.get(
+                f"https://www.twse.com.tw/rwd/zh/fund/T86?response=json&date={date_str}&selectType=ALL",
+                timeout=30
+            )
+            data = resp.json()
+        except Exception as e:
+            print(f"  ⚠️ {date_str} 三大法人資料取得失敗: {e}")
+            continue
+
+        if data.get("stat") != "OK" or not data.get("data"):
+            continue
+
+        flows = {}
+        for row in data["data"]:
+            rec = dict(zip(data["fields"], row))
+            code = rec.get("證券代號", "").strip()
+
+            def _n(key):
+                return _safe_float(rec.get(key, "0"))
+
+            flows[code] = {
+                "foreign_net": _n("外陸資買賣超股數(不含外資自營商)") + _n("外資自營商買賣超股數"),
+                "trust_net": _n("投信買賣超股數"),
+                "dealer_net": _n("自營商買賣超股數"),
+                "total_net": _n("三大法人買賣超股數"),
+            }
+        print(f"  ✅ 三大法人資料日期: {date_str}（共 {len(flows)} 檔）")
+        return flows, date_str
+
+    print("  ❌ 找不到近期三大法人資料")
+    return {}, None
 
 
 def download_historical(tickers, period=None, max_retries=3):

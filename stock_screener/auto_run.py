@@ -69,6 +69,10 @@ def main():
 
         logging.info(f"成功下載 {len(daily_data)} 檔歷史數據")
 
+        # ── Step 2.5: 取得三大法人買賣超（全市場一次性資料，用股票代號查表）──
+        inst_flows, inst_date = data_fetcher.fetch_institutional_flows()
+        logging.info(f"三大法人資料日期: {inst_date}，共 {len(inst_flows)} 檔")
+
         # ── Step 3: 掃描 ──
         results = []
         skipped = 0
@@ -113,9 +117,17 @@ def main():
                     change_pct = 0
 
                 trend_labels = config.TREND_LABELS
+                code = info.get("code", ticker.split(".")[0])
+
+                # 三大法人買賣超（股數 → 張數）；T86 查不到就是 None，代表當天沒有這檔的法人資料
+                flow = inst_flows.get(code)
+                foreign_lots = flow["foreign_net"] // 1000 if flow else None
+                trust_lots = flow["trust_net"] // 1000 if flow else None
+                dealer_lots = flow["dealer_net"] // 1000 if flow else None
+                total_lots = flow["total_net"] // 1000 if flow else None
 
                 results.append({
-                    "code": info.get("code", ticker.split(".")[0]),
+                    "code": code,
                     "name": info.get("name", ""),
                     "market": info.get("market", ""),
                     "close": close_price,
@@ -127,6 +139,11 @@ def main():
                     "weekly_reason": w_result["reason"],
                     "weekly_trend_code": w_result["trend_code"],
                     "weekly_trend_text": trend_labels.get(w_result["trend_code"], ""),
+                    "inst_date": inst_date,
+                    "foreign_lots": foreign_lots,
+                    "trust_lots": trust_lots,
+                    "dealer_lots": dealer_lots,
+                    "total_lots": total_lots,
                 })
 
             except Exception as e:
