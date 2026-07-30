@@ -199,6 +199,31 @@ def render_stat_tile(label, amount_ntd):
     )
 
 
+def render_market_signal(index_change, inst_net_ntd):
+    if index_change is None or inst_net_ntd is None:
+        return
+    index_up = index_change >= 0
+    inst_buy = inst_net_ntd >= 0
+    if index_up and inst_buy:
+        color, label, desc = "#e03131", "多方一致", "大盤上漲，三大法人同步買超"
+    elif not index_up and not inst_buy:
+        color, label, desc = "#2f9e44", "空方一致", "大盤下跌，三大法人同步賣超"
+    elif index_up and not inst_buy:
+        color, label, desc = "#f08c00", "上漲但法人賣超", "指數上漲，三大法人卻賣超，留意上漲力道是否穩固"
+    else:
+        color, label, desc = "#f08c00", "下跌但法人買超", "指數下跌，三大法人卻買超，留意是否醞釀反彈"
+    st.markdown(
+        f"""
+        <div style="border-left:6px solid {color}; background:rgba(128,128,128,0.08);
+                    padding:0.75rem 1rem; border-radius:6px; margin-bottom:1rem;">
+            <span style="font-size:1.15rem; font-weight:700; color:{color};">🚦 {label}</span>
+            <span style="font-size:0.9rem; color:gray; margin-left:0.6rem;">{desc}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def find_trading_day_on_or_before(target_date, max_lookback_days=10):
     for i in range(max_lookback_days):
         date_str = (target_date - timedelta(days=i)).strftime("%Y%m%d")
@@ -296,48 +321,58 @@ if df is not None:
     overview = fetch_market_overview(trade_date)
 
     st.subheader("📌 市場總覽")
-    col1, col2 = st.columns(2)
 
     @st.fragment(run_every=10 if is_today else None)
-    def render_taiex_tile():
+    def render_market_overview():
         realtime = fetch_realtime_taiex() if is_today else None
+        index_change = None
+
         if realtime and realtime["已開盤"]:
-            st.metric(
-                "大盤指數（即時，約5秒延遲）",
-                f"{realtime['收盤指數']:,.2f}",
-                delta=f"{realtime['漲跌點數']:+,.2f} 點（{realtime['漲跌百分比']:+.2f}%）",
-                delta_color="inverse",
-            )
-            st.caption(f"更新時間：{realtime['時間']}")
+            index_change = realtime["漲跌點數"]
         elif overview and overview["taiex"]:
-            taiex = overview["taiex"]
-            st.metric(
-                "大盤指數（加權指數，收盤）",
-                f"{taiex['收盤指數']:,.2f}",
-                delta=f"{taiex['漲跌點數']:+,.2f} 點（{taiex['漲跌百分比']:+.2f}%）",
-                delta_color="inverse",
-            )
-            if is_today:
-                st.caption("尚未開盤，顯示為前一交易日收盤價與漲跌")
-        else:
-            st.metric("大盤指數（加權指數）", "查無資料")
+            index_change = overview["taiex"]["漲跌點數"]
 
-    with col1:
-        render_taiex_tile()
-    with col2:
-        if overview and overview["margin_balance"] is not None:
-            st.metric("融資餘額", f"{overview['margin_balance'] / 1e8:,.2f} 億元")
-        else:
-            st.metric("融資餘額", "查無資料")
+        inst_net = overview["institutional"].get("合計") if overview and overview["institutional"] else None
+        render_market_signal(index_change, inst_net)
 
-    if overview and overview["institutional"]:
-        inst = overview["institutional"]
-        c1, c2, c3, c4 = st.columns(4)
-        for col, key in zip((c1, c2, c3, c4), ("外資", "投信", "自營商", "合計")):
-            with col:
-                render_stat_tile("三大法人合計" if key == "合計" else key, inst[key])
-    else:
-        st.info("查無三大法人買賣金額資料")
+        col1, col2 = st.columns(2)
+        with col1:
+            if realtime and realtime["已開盤"]:
+                st.metric(
+                    "大盤指數（即時，約5秒延遲）",
+                    f"{realtime['收盤指數']:,.2f}",
+                    delta=f"{realtime['漲跌點數']:+,.2f} 點（{realtime['漲跌百分比']:+.2f}%）",
+                    delta_color="inverse",
+                )
+                st.caption(f"更新時間：{realtime['時間']}")
+            elif overview and overview["taiex"]:
+                taiex = overview["taiex"]
+                st.metric(
+                    "大盤指數（加權指數，收盤）",
+                    f"{taiex['收盤指數']:,.2f}",
+                    delta=f"{taiex['漲跌點數']:+,.2f} 點（{taiex['漲跌百分比']:+.2f}%）",
+                    delta_color="inverse",
+                )
+                if is_today:
+                    st.caption("尚未開盤，顯示為前一交易日收盤價與漲跌")
+            else:
+                st.metric("大盤指數（加權指數）", "查無資料")
+        with col2:
+            if overview and overview["margin_balance"] is not None:
+                st.metric("融資餘額", f"{overview['margin_balance'] / 1e8:,.2f} 億元")
+            else:
+                st.metric("融資餘額", "查無資料")
+
+        if overview and overview["institutional"]:
+            inst = overview["institutional"]
+            c1, c2, c3, c4 = st.columns(4)
+            for col, key in zip((c1, c2, c3, c4), ("外資", "投信", "自營商", "合計")):
+                with col:
+                    render_stat_tile("三大法人合計" if key == "合計" else key, inst[key])
+        else:
+            st.info("查無三大法人買賣金額資料")
+
+    render_market_overview()
 
     st.divider()
 
