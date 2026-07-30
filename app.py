@@ -90,6 +90,86 @@ def fetch_day_data(date_str):
         return None
 
 
+@st.cache_data(ttl=3600)
+def fetch_market_overview(date_str):
+    try:
+        index_res = requests.get(
+            f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json",
+            headers=HEADERS, timeout=10
+        )
+        index_json = index_res.json()
+        index_table = next(
+            (t for t in index_json.get("tables", []) if "價格指數" in (t.get("title") or "")),
+            None
+        )
+        taiex = None
+        if index_table:
+            fields = index_table["fields"]
+            for row in index_table["data"]:
+                if row[fields.index("指數")] != "發行量加權股價指數":
+                    continue
+                sign = -1 if "color:green" in row[fields.index("漲跌(+/-)")] else 1
+                taiex = {
+                    "收盤指數": to_num(row[fields.index("收盤指數")]),
+                    "漲跌點數": to_num(row[fields.index("漲跌點數")]) * sign,
+                    "漲跌百分比": to_num(row[fields.index("漲跌百分比(%)")]),  # 已內含正負號
+                }
+                break
+
+        margin_res = requests.get(
+            f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={date_str}&selectType=ALL&response=json",
+            headers=HEADERS, timeout=10
+        )
+        margin_json = margin_res.json()
+        credit_table = next(
+            (t for t in margin_json.get("tables", []) if "信用交易統計" in (t.get("title") or "")),
+            None
+        )
+        margin_balance = None
+        if credit_table:
+            fields = credit_table["fields"]
+            for row in credit_table["data"]:
+                if row[0] == "融資金額(仟元)":
+                    margin_balance = to_num(row[fields.index("今日餘額")]) * 1000  # 仟元 -> 元
+                    break
+
+        inst_res = requests.get(
+            f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?response=json&dayDate={date_str}&type=day",
+            headers=HEADERS, timeout=10
+        )
+        inst_json = inst_res.json()
+        institutional = {}
+        if inst_json.get("stat") == "OK":
+            net = {row[0]: to_num(row[3]) for row in inst_json["data"]}
+            institutional = {
+                "外資": net.get("外資及陸資(不含外資自營商)", 0),
+                "投信": net.get("投信", 0),
+                "自營商": net.get("自營商(自行買賣)", 0) + net.get("自營商(避險)", 0),
+                "合計": net.get("合計", 0),
+            }
+
+        if taiex is None and margin_balance is None and not institutional:
+            return None
+        return {"taiex": taiex, "margin_balance": margin_balance, "institutional": institutional}
+    except Exception:
+        return None
+
+
+def render_stat_tile(label, amount_ntd):
+    yi = amount_ntd / 1e8
+    color = "#e03131" if yi >= 0 else "#2f9e44"
+    direction = "買超" if yi >= 0 else "賣超"
+    st.markdown(
+        f"""
+        <div style="line-height:1.3;">
+            <div style="font-size:0.875rem;color:gray;">{label}（{direction}）</div>
+            <div style="font-size:1.6rem;font-weight:600;color:{color};">{yi:+,.2f} 億元</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def find_trading_day_on_or_before(target_date, max_lookback_days=10):
     for i in range(max_lookback_days):
         date_str = (target_date - timedelta(days=i)).strftime("%Y%m%d")
@@ -182,6 +262,38 @@ if df is not None:
         st.caption(f"資料日期：{display_date}（您選擇的日期非交易日，已自動顯示最近一個交易日資料，來源：台灣證券交易所）")
     else:
         st.caption(f"資料日期：{display_date}（盤後資料，來源：台灣證券交易所）")
+
+    overview = fetch_market_overview(trade_date)
+
+    st.subheader("📌 市場總覽")
+    col1, col2 = st.columns(2)
+    with col1:
+        if overview and overview["taiex"]:
+            taiex = overview["taiex"]
+            st.metric(
+                "大盤指數（加權指數）",
+                f"{taiex['收盤指數']:,.2f}",
+                delta=f"{taiex['漲跌點數']:+,.2f} 點（{taiex['漲跌百分比']:+.2f}%）",
+                delta_color="inverse",
+            )
+        else:
+            st.metric("大盤指數（加權指數）", "查無資料")
+    with col2:
+        if overview and overview["margin_balance"] is not None:
+            st.metric("融資餘額", f"{overview['margin_balance'] / 1e8:,.2f} 億元")
+        else:
+            st.metric("融資餘額", "查無資料")
+
+    if overview and overview["institutional"]:
+        inst = overview["institutional"]
+        c1, c2, c3, c4 = st.columns(4)
+        for col, key in zip((c1, c2, c3, c4), ("外資", "投信", "自營商", "合計")):
+            with col:
+                render_stat_tile("三大法人合計" if key == "合計" else key, inst[key])
+    else:
+        st.info("查無三大法人買賣金額資料")
+
+    st.divider()
 
     inst_type = st.sidebar.selectbox(
         "法人別", ["三大法人合計", "外資買賣超", "投信買賣超", "自營商買賣超"]
