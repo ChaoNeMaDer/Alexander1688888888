@@ -198,10 +198,20 @@ def detect_anomalies(history_df, z_threshold=2.0):
             z = (today[col] - mean) / std
             if abs(z) >= z_threshold:
                 direction = "買超" if today[col] >= 0 else "賣超"
-                anomalies.append(
-                    f"**{label}{direction}金額異常** — 今日 {today[col] / 1e8:+.2f} 億元，"
-                    f"明顯偏離近{len(baseline)}日均值（{mean / 1e8:+.2f} 億元），z-score={z:+.1f}"
-                )
+                anomalies.append({
+                    "type": "institutional",
+                    "entity": label,
+                    "direction": direction,
+                    "today_value": today[col],
+                    "mean": mean,
+                    "z": z,
+                    "baseline_n": len(baseline),
+                    "label": f"{label}{direction}金額異常",
+                    "summary": (
+                        f"今日 {today[col] / 1e8:+.2f} 億元，"
+                        f"明顯偏離近{len(baseline)}日均值（{mean / 1e8:+.2f} 億元），z-score={z:+.1f}"
+                    ),
+                })
 
     margin_diff = history_df["融資餘額"].diff().dropna()
     if len(margin_diff) >= 6:
@@ -211,11 +221,104 @@ def detect_anomalies(history_df, z_threshold=2.0):
             z = (today_diff - mean) / std
             if abs(z) >= z_threshold:
                 direction = "增加" if today_diff >= 0 else "減少"
-                anomalies.append(
-                    f"**融資餘額單日{direction}異常** — 單日變動 {today_diff / 1e8:+.2f} 億元，"
-                    f"明顯偏離近期平均，z-score={z:+.1f}"
-                )
+                anomalies.append({
+                    "type": "margin",
+                    "direction": direction,
+                    "today_value": today_diff,
+                    "mean": mean,
+                    "z": z,
+                    "baseline_n": len(baseline_diff),
+                    "label": f"融資餘額單日{direction}異常",
+                    "summary": (
+                        f"單日變動 {today_diff / 1e8:+.2f} 億元，"
+                        f"明顯偏離近期平均，z-score={z:+.1f}"
+                    ),
+                })
     return anomalies
+
+
+def _describe_context(index_change, inst_net):
+    context = []
+    if index_change is not None:
+        context.append(f"大盤當日{'上漲' if index_change >= 0 else '下跌'} {abs(index_change):.2f} 點")
+    if inst_net is not None:
+        context.append(f"三大法人合計{'買超' if inst_net >= 0 else '賣超'} {abs(inst_net) / 1e8:.2f} 億元")
+    return context
+
+
+def explain_institutional(a, index_change, inst_net):
+    entity, direction = a["entity"], a["direction"]
+    entity_def = {
+        "外資": "外資（含外國機構投資人與陸資）",
+        "投信": "國內投信基金",
+        "自營商": "證券自營商（用公司自有資金操作）",
+        "三大法人合計": "外資、投信、自營商三者加總",
+    }.get(entity, entity)
+
+    lines = [
+        f"**{entity}是什麼** {entity_def}，是市場觀察機構籌碼動向的三大主力之一。",
+        (
+            f"**今天發生了什麼** {entity}今日{direction} {abs(a['today_value']) / 1e8:.2f} 億元，"
+            f"相較近{a['baseline_n']}日平均（{a['mean'] / 1e8:+.2f} 億元）明顯偏離，z-score={a['z']:+.1f}，"
+            "統計上代表這幾乎不是隨機波動，而是方向性很強的操作。"
+        ),
+    ]
+    if direction == "買超":
+        lines.append("**可能成因** 評價偏低轉為加碼、特定族群或政策題材帶動買盤集中，或是被動式資金移動（如 ETF 成分股調整、期現貨對沖）。")
+    else:
+        lines.append("**可能成因** 獲利了結、風險趨避轉為調節持股、特定產業基本面轉差引發出貨，或是被動式調整（如 ETF 成分股汰換）帶來的賣壓。")
+
+    context = _describe_context(index_change, inst_net if entity != "三大法人合計" else None)
+    if context:
+        lines.append(f"**同一天的其他訊號** {'、'.join(context)}。")
+
+    lines.append("**對決策的意義** 單一法人買賣超金額異常，代表籌碼出現集中且不尋常的動向，值得留意是否延續；但單一天的數字不足以判斷趨勢是否成立，建議搭配後續 1-2 個交易日的同一指標觀察是否同方向持續。")
+    return "\n\n".join(lines)
+
+
+def explain_margin(a, index_change, inst_net):
+    direction = a["direction"]
+    lines = [
+        "**融資餘額是什麼** 融資＝投資人跟券商借錢買股票（放大槓桿）。融資餘額就是全市場「借錢買股票、還沒還」的總金額，是散戶槓桿／投機情緒的指標。",
+        (
+            f"**今天發生了什麼** 融資餘額單日{direction} {abs(a['today_value']) / 1e8:.2f} 億元，"
+            f"明顯偏離近期平均變動幅度，z-score={a['z']:+.1f}，統計上代表這不是正常的漲跌互抵，是異常快的槓桿變化。"
+        ),
+    ]
+    if direction == "減少":
+        lines.append(
+            "**可能成因**\n"
+            "1. 融資斷頭（被動）：股價下跌時融資戶被追繳保證金，繳不出來就被強制砍倉。\n"
+            "2. 主動去槓桿：投資人自己看壞後市，提前平倉還錢降低風險。"
+        )
+    else:
+        lines.append("**可能成因** 投資人大舉加碼槓桿買進，可能是追高情緒濃厚，也可能是逢低加碼、對後市偏樂觀。")
+
+    context = _describe_context(index_change, inst_net)
+    if context:
+        aligned = (
+            index_change is not None and inst_net is not None
+            and ((index_change < 0 and inst_net < 0 and direction == "減少")
+                 or (index_change > 0 and inst_net > 0 and direction == "增加"))
+        )
+        note = " 三個訊號同方向出現，代表這是一次有分量的行情變化，可信度較高。" if aligned else ""
+        lines.append(f"**同一天的其他訊號** {'、'.join(context)}。{note}")
+
+    if direction == "減少":
+        lines.append("**對決策的意義** 融資餘額異常減少不是單純多空訊號，而是值得多看一眼的警示——如果接下來融資持續下滑但股價止跌，常被解讀為浮額出清、短線有望技術性反彈；如果融資持續減少、股價也持續破底，代表去槓桿可能還沒結束。")
+    else:
+        lines.append("**對決策的意義** 融資餘額異常增加代表市場槓桿快速堆高，短線追價意願強，但也墊高了下跌時的賣壓風險（一旦股價回檔，更容易觸發連鎖斷頭）。")
+    return "\n\n".join(lines)
+
+
+@st.dialog("📊 異常訊號解析")
+def show_anomaly_dialog(anomaly, index_change, inst_net):
+    st.subheader(anomaly["label"])
+    st.caption(anomaly["summary"])
+    if anomaly["type"] == "institutional":
+        st.markdown(explain_institutional(anomaly, index_change, inst_net))
+    else:
+        st.markdown(explain_margin(anomaly, index_change, inst_net))
 
 
 @st.cache_data(ttl=10)
@@ -395,6 +498,10 @@ if df is not None:
         elif overview and overview["taiex"]:
             index_change = overview["taiex"]["漲跌點數"]
 
+        # 異常摘要是根據 trade_date（最近一個完整交易日）的資料判讀，
+        # 要跟「當天」的大盤漲跌對照，不能混用即時報價（可能是不同一天）
+        trade_date_index_change = overview["taiex"]["漲跌點數"] if overview and overview["taiex"] else None
+
         inst_net = overview["institutional"].get("合計") if overview and overview["institutional"] else None
         render_market_signal(index_change, inst_net)
 
@@ -435,17 +542,21 @@ if df is not None:
         else:
             st.info("查無三大法人買賣金額資料")
 
-    render_market_overview()
+        st.subheader("⚠️ 異常摘要")
+        with st.spinner("正在比對近期資料..."):
+            history_df = fetch_overview_history(trade_date)
+        anomalies = detect_anomalies(history_df)
+        if anomalies:
+            for i, a in enumerate(anomalies):
+                with st.container(border=True):
+                    box_col, btn_col = st.columns([6, 1], vertical_alignment="center")
+                    box_col.markdown(f"⚠️ **{a['label']}** — {a['summary']}")
+                    if btn_col.button("查看解析", key=f"anomaly_btn_{trade_date}_{i}"):
+                        show_anomaly_dialog(a, trade_date_index_change, inst_net)
+        else:
+            st.caption(f"近{max(len(history_df) - 1, 0)}日比對下，目前無明顯偏離常態的訊號")
 
-    st.subheader("⚠️ 異常摘要")
-    with st.spinner("正在比對近期資料..."):
-        history_df = fetch_overview_history(trade_date)
-    anomalies = detect_anomalies(history_df)
-    if anomalies:
-        for a in anomalies:
-            st.warning(a)
-    else:
-        st.caption(f"近{max(len(history_df) - 1, 0)}日比對下，目前無明顯偏離常態的訊號")
+    render_market_overview()
 
     st.divider()
 
