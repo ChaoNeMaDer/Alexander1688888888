@@ -155,6 +155,35 @@ def fetch_market_overview(date_str):
         return None
 
 
+@st.cache_data(ttl=10)
+def fetch_realtime_taiex():
+    try:
+        res = requests.get(
+            "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw",
+            headers=HEADERS, timeout=5
+        )
+        rows = res.json().get("msgArray", [])
+        if not rows:
+            return None
+        row = rows[0]
+        prev_close = to_num(row.get("y"))
+        z = row.get("z")
+        is_open = z not in (None, "-")
+        current = to_num(z) if is_open else prev_close
+        if pd.isna(current) or pd.isna(prev_close):
+            return None
+        change = current - prev_close
+        return {
+            "收盤指數": current,
+            "漲跌點數": change,
+            "漲跌百分比": (change / prev_close * 100) if prev_close else 0,
+            "時間": row.get("t"),
+            "已開盤": is_open,
+        }
+    except Exception:
+        return None
+
+
 def render_stat_tile(label, amount_ntd):
     yi = amount_ntd / 1e8
     color = "#e03131" if yi >= 0 else "#2f9e44"
@@ -253,6 +282,7 @@ st.title("📊 三大法人籌碼戰報")
 st.sidebar.title("⚙️ 篩選設定")
 query_date = st.sidebar.date_input("查詢日期", value=datetime.now(), max_value=datetime.now())
 query_datetime = datetime.combine(query_date, datetime.min.time())
+is_today = query_date.strftime("%Y%m%d") == datetime.now().strftime("%Y%m%d")
 
 df, trade_date = find_trading_day_on_or_before(query_datetime)
 
@@ -267,17 +297,34 @@ if df is not None:
 
     st.subheader("📌 市場總覽")
     col1, col2 = st.columns(2)
-    with col1:
-        if overview and overview["taiex"]:
+
+    @st.fragment(run_every=10 if is_today else None)
+    def render_taiex_tile():
+        realtime = fetch_realtime_taiex() if is_today else None
+        if realtime:
+            st.metric(
+                "大盤指數（即時，約5秒延遲）",
+                f"{realtime['收盤指數']:,.2f}",
+                delta=f"{realtime['漲跌點數']:+,.2f} 點（{realtime['漲跌百分比']:+.2f}%）",
+                delta_color="inverse",
+            )
+            if not realtime["已開盤"]:
+                st.caption("尚未開盤，顯示為前一交易日收盤價")
+            else:
+                st.caption(f"更新時間：{realtime['時間']}")
+        elif overview and overview["taiex"]:
             taiex = overview["taiex"]
             st.metric(
-                "大盤指數（加權指數）",
+                "大盤指數（加權指數，收盤）",
                 f"{taiex['收盤指數']:,.2f}",
                 delta=f"{taiex['漲跌點數']:+,.2f} 點（{taiex['漲跌百分比']:+.2f}%）",
                 delta_color="inverse",
             )
         else:
             st.metric("大盤指數（加權指數）", "查無資料")
+
+    with col1:
+        render_taiex_tile()
     with col2:
         if overview and overview["margin_balance"] is not None:
             st.metric("融資餘額", f"{overview['margin_balance'] / 1e8:,.2f} 億元")
