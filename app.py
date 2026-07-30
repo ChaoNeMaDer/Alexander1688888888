@@ -91,6 +91,69 @@ def fetch_day_data(date_str):
         return None
 
 
+# TWSE 上市公司「產業別」代碼表（依 t187ap03_L 實際出現的代碼核對），
+# 未收錄的代碼一律以「產業代碼{code}」呈現，不用猜測名稱
+INDUSTRY_NAMES = {
+    "01": "水泥工業", "02": "食品工業", "03": "塑膠工業", "04": "紡織纖維",
+    "05": "電機機械", "06": "電器電纜", "08": "玻璃陶瓷", "09": "造紙工業",
+    "10": "鋼鐵工業", "11": "橡膠工業", "12": "汽車工業", "14": "建材營造業",
+    "15": "航運業", "16": "觀光事業", "17": "金融保險業", "18": "貿易百貨業",
+    "20": "其他業", "21": "化學工業", "22": "生技醫療業", "23": "油電燃氣業",
+    "24": "半導體業", "25": "電腦及週邊設備業", "26": "光電業", "27": "通信網路業",
+    "28": "電子零組件業", "29": "電子通路業", "30": "資訊服務業", "31": "其他電子業",
+    "35": "綠能環保", "36": "數位雲端", "37": "運動休閒", "38": "居家生活",
+    "91": "存託憑證",
+}
+
+
+@st.cache_data(ttl=86400)
+def fetch_industry_map():
+    try:
+        res = SESSION.get(
+            "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
+            headers=HEADERS, timeout=15
+        )
+        rows = res.json()
+        return {row["公司代號"]: row["產業別"] for row in rows}
+    except Exception:
+        return {}
+
+
+def build_industry_breakdown(df, inst_type):
+    industry_map = fetch_industry_map()
+    if not industry_map or df is None or df.empty:
+        return pd.DataFrame()
+    working = df[["股票代號", "收盤價", inst_type]].copy()
+    working["產業代碼"] = working["股票代號"].map(industry_map)
+    working = working.dropna(subset=["產業代碼", "收盤價"])
+    working["產業別"] = working["產業代碼"].map(lambda c: INDUSTRY_NAMES.get(c, f"產業代碼{c}"))
+    working["買賣超金額"] = working[inst_type] * working["收盤價"]
+    grouped = working.groupby("產業別", as_index=False)["買賣超金額"].sum()
+    grouped = grouped[grouped["買賣超金額"] != 0]
+    return grouped.sort_values("買賣超金額")
+
+
+def render_industry_chart(df, inst_type):
+    grouped = build_industry_breakdown(df, inst_type)
+    if grouped.empty:
+        st.info("查無產業別資料")
+        return
+    colors = ["#e03131" if v >= 0 else "#2f9e44" for v in grouped["買賣超金額"]]
+    fig = go.Figure(go.Bar(
+        x=grouped["買賣超金額"] / 1e8,
+        y=grouped["產業別"],
+        orientation="h",
+        marker_color=colors,
+    ))
+    fig.update_layout(
+        xaxis_title="買賣超金額（億元，估算值）",
+        height=max(400, len(grouped) * 24),
+        margin=dict(l=10, r=10, t=10, b=10),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("金額為「買賣超股數 × 收盤價」估算值，非實際成交金額，僅供參考相對強弱；不含 ETF 等無產業分類的標的。")
+
+
 def _fetch_market_overview_uncached(date_str):
     try:
         index_res = SESSION.get(
@@ -714,11 +777,13 @@ if df is not None:
 
     st.caption("💡 點選下方表格中的一列，即可跳出該股票近一週的股價與法人買賣超曲線圖")
 
-    tab_buy, tab_sell = st.tabs(["🟢 買超排行", "🔴 賣超排行"])
+    tab_buy, tab_sell, tab_industry = st.tabs(["🟢 買超排行", "🔴 賣超排行", "🏭 產業別買賣超"])
     with tab_buy:
         render_ranking(filtered[filtered[inst_type] > 0], ascending=False, table_key="table_buy")
     with tab_sell:
         render_ranking(filtered[filtered[inst_type] < 0], ascending=True, table_key="table_sell")
+    with tab_industry:
+        render_industry_chart(df, inst_type)
 
 else:
     st.error(f"⚠️ 查無 {query_date.strftime('%Y-%m-%d')} 前後的三大法人籌碼資料，請換一個日期再試。")
