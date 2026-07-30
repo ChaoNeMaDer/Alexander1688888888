@@ -491,19 +491,15 @@ if df is not None:
     @st.fragment(run_every=10 if is_today else None)
     def render_market_overview():
         realtime = fetch_realtime_taiex() if is_today else None
-        index_change = None
 
-        if realtime and realtime["已開盤"]:
-            index_change = realtime["漲跌點數"]
-        elif overview and overview["taiex"]:
-            index_change = overview["taiex"]["漲跌點數"]
-
-        # 異常摘要是根據 trade_date（最近一個完整交易日）的資料判讀，
-        # 要跟「當天」的大盤漲跌對照，不能混用即時報價（可能是不同一天）
+        # 訊號燈號／異常摘要都是根據 trade_date（三大法人資料實際涵蓋的交易日）判讀，
+        # 必須跟「同一天」的大盤漲跌對照。三大法人統計要收盤後才公布，
+        # 盤中不能拿當下的即時指數去配前一個交易日的法人資料，否則兩者根本不是同一天的事。
         trade_date_index_change = overview["taiex"]["漲跌點數"] if overview and overview["taiex"] else None
-
         inst_net = overview["institutional"].get("合計") if overview and overview["institutional"] else None
-        render_market_signal(index_change, inst_net)
+        render_market_signal(trade_date_index_change, inst_net)
+        if is_today and realtime and realtime["已開盤"]:
+            st.caption(f"🚦 訊號依 {display_date}（最近一個完整交易日）資料判讀，三大法人統計需等收盤後公布")
 
         col1, col2 = st.columns(2)
         with col1:
