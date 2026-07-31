@@ -242,8 +242,10 @@ def download_historical(tickers, period=None, max_retries=3):
 def resample_to_weekly(daily_df):
     """
     將日K數據重新取樣為週K。
-    若最後一筆日K的星期不是週五，代表本週交易日尚未走完，
+    若最後一筆日K跟「今天」還在同一個 ISO 週，代表本週交易日可能尚未走完，
     該週的週K只用了部分交易日、不算收完，捨棄最後一筆避免誤判。
+    用 ISO 週判斷而非「最後一筆是不是週五」，是因為國定假日（颱風假、調整放假）
+    可能讓本週最後一個交易日落在週五之前，若還用週五判斷會誤刪掉其實已經收完的一週。
     """
     weekly = daily_df.resample("W-FRI").agg({
         "Open": "first",
@@ -252,7 +254,7 @@ def resample_to_weekly(daily_df):
         "Close": "last",
         "Volume": "sum",
     }).dropna()
-    if len(weekly) > 0 and daily_df.index[-1].weekday() != 4:
+    if len(weekly) > 0 and daily_df.index[-1].isocalendar()[:2] == datetime.now().isocalendar()[:2]:
         weekly = weekly.iloc[:-1]
     return weekly
 
