@@ -219,8 +219,22 @@ def _fetch_market_overview_uncached(date_str):
 
 
 @st.cache_data(ttl=3600)
-def fetch_market_overview(date_str):
+def _fetch_market_overview_cached_long(date_str):
     return _fetch_market_overview_uncached(date_str)
+
+
+@st.cache_data(ttl=300)
+def _fetch_market_overview_cached_short(date_str):
+    return _fetch_market_overview_uncached(date_str)
+
+
+def fetch_market_overview(date_str):
+    # 融資餘額（MI_MARGN）公布時間常晚於大盤指數／三大法人，當天資料剛好卡在
+    # 「已可查詢但 TWSE 尚未公布」的情況很常見；用短 TTL 讓使用者不用等滿 1 小時
+    # 就能看到剛公布的資料。非當天的歷史資料已定案，維持長 TTL 即可。
+    if date_str == datetime.now().strftime("%Y%m%d"):
+        return _fetch_market_overview_cached_short(date_str)
+    return _fetch_market_overview_cached_long(date_str)
 
 
 @st.cache_data(ttl=3600)
