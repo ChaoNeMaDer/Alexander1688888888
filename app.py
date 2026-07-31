@@ -1,7 +1,8 @@
+import glob
+import json
+import os
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import requests
 from datetime import datetime, timedelta
 
@@ -31,8 +32,8 @@ pwa_meta_html = """
 st.components.v1.html(pwa_meta_html, height=0)
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
-WEEK_TRADING_DAYS = 5
 SESSION = requests.Session()
+SCREENER_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stock_screener", "output")
 
 
 def to_num(value):
@@ -40,130 +41,16 @@ def to_num(value):
 
 
 # -----------------------------------------------------------------------------
-# 2. 數據抓取：證交所「三大法人買賣超日報」+「每日收盤行情」
-#    以單一交易日為單位快取，主排行榜與週曲線圖共用同一份快取
+# 2. 數據抓取：證交所「大盤指數」+「融資餘額」+「三大法人買賣超」
+#    以單一交易日為單位快取
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=3600)
-def fetch_mi_index_json(date_str):
-    # MI_INDEX 同時含「每日收盤行情」（個股）與「價格指數」（大盤）兩張表，
-    # fetch_day_data 和 _fetch_market_overview_uncached 都要用到，共用同一份快取避免重複打 API
-    res = SESSION.get(
-        f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json",
-        headers=HEADERS, timeout=10
-    )
-    return res.json()
-
-
-@st.cache_data(ttl=3600)
-def fetch_day_data(date_str):
-    try:
-        inst_res = SESSION.get(
-            f"https://www.twse.com.tw/rwd/zh/fund/T86?response=json&date={date_str}&selectType=ALL",
-            headers=HEADERS, timeout=10
-        )
-        inst_json = inst_res.json()
-        if inst_json.get("stat") != "OK" or not inst_json.get("data"):
-            return None
-
-        price_json = fetch_mi_index_json(date_str)
-        price_table = next(
-            (t for t in price_json.get("tables", []) if "每日收盤行情" in (t.get("title") or "")),
-            None
-        )
-        if not price_table:
-            return None
-
-        inst_df = pd.DataFrame(inst_json["data"], columns=inst_json["fields"])
-        inst_df["外資買賣超"] = (
-            inst_df["外陸資買賣超股數(不含外資自營商)"].map(to_num)
-            + inst_df["外資自營商買賣超股數"].map(to_num)
-        )
-        inst_df["投信買賣超"] = inst_df["投信買賣超股數"].map(to_num)
-        inst_df["自營商買賣超"] = inst_df["自營商買賣超股數"].map(to_num)
-        inst_df["三大法人合計"] = inst_df["三大法人買賣超股數"].map(to_num)
-        inst_df = inst_df.rename(columns={"證券代號": "股票代號", "證券名稱": "股票名稱"})
-        inst_df = inst_df[["股票代號", "股票名稱", "外資買賣超", "投信買賣超", "自營商買賣超", "三大法人合計"]]
-        inst_df["股票名稱"] = inst_df["股票名稱"].str.strip()
-
-        price_df = pd.DataFrame(price_table["data"], columns=price_table["fields"])
-        price_df = price_df.rename(columns={"證券代號": "股票代號"})[["股票代號", "收盤價", "成交股數"]]
-        price_df["收盤價"] = price_df["收盤價"].map(to_num)
-        price_df["成交股數"] = price_df["成交股數"].map(to_num)
-
-        merged = inst_df.merge(price_df, on="股票代號", how="left")
-        # T86 報表含權證等非個股標的，僅保留有實際收盤價／成交量的股票與ETF
-        merged = merged.dropna(subset=["收盤價"]).reset_index(drop=True)
-        return merged
-    except Exception:
-        return None
-
-
-# TWSE 上市公司「產業別」代碼表（依 t187ap03_L 實際出現的代碼核對），
-# 未收錄的代碼一律以「產業代碼{code}」呈現，不用猜測名稱
-INDUSTRY_NAMES = {
-    "01": "水泥工業", "02": "食品工業", "03": "塑膠工業", "04": "紡織纖維",
-    "05": "電機機械", "06": "電器電纜", "08": "玻璃陶瓷", "09": "造紙工業",
-    "10": "鋼鐵工業", "11": "橡膠工業", "12": "汽車工業", "14": "建材營造業",
-    "15": "航運業", "16": "觀光事業", "17": "金融保險業", "18": "貿易百貨業",
-    "20": "其他業", "21": "化學工業", "22": "生技醫療業", "23": "油電燃氣業",
-    "24": "半導體業", "25": "電腦及週邊設備業", "26": "光電業", "27": "通信網路業",
-    "28": "電子零組件業", "29": "電子通路業", "30": "資訊服務業", "31": "其他電子業",
-    "35": "綠能環保", "36": "數位雲端", "37": "運動休閒", "38": "居家生活",
-    "91": "存託憑證",
-}
-
-
-@st.cache_data(ttl=86400)
-def fetch_industry_map():
-    try:
-        res = SESSION.get(
-            "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
-            headers=HEADERS, timeout=15
-        )
-        rows = res.json()
-        return {row["公司代號"]: row["產業別"] for row in rows}
-    except Exception:
-        return {}
-
-
-def build_industry_breakdown(df, inst_type):
-    industry_map = fetch_industry_map()
-    if not industry_map or df is None or df.empty:
-        return pd.DataFrame()
-    working = df[["股票代號", "收盤價", inst_type]].copy()
-    working["產業代碼"] = working["股票代號"].map(industry_map)
-    working = working.dropna(subset=["產業代碼", "收盤價"])
-    working["產業別"] = working["產業代碼"].map(lambda c: INDUSTRY_NAMES.get(c, f"產業代碼{c}"))
-    working["買賣超金額"] = working[inst_type] * working["收盤價"]
-    grouped = working.groupby("產業別", as_index=False)["買賣超金額"].sum()
-    grouped = grouped[grouped["買賣超金額"] != 0]
-    return grouped.sort_values("買賣超金額")
-
-
-def render_industry_chart(df, inst_type):
-    grouped = build_industry_breakdown(df, inst_type)
-    if grouped.empty:
-        st.info("查無產業別資料")
-        return
-    colors = ["#e03131" if v >= 0 else "#2f9e44" for v in grouped["買賣超金額"]]
-    fig = go.Figure(go.Bar(
-        x=grouped["買賣超金額"] / 1e8,
-        y=grouped["產業別"],
-        orientation="h",
-        marker_color=colors,
-    ))
-    fig.update_layout(
-        xaxis_title="買賣超金額（億元，估算值）",
-        height=max(400, len(grouped) * 24),
-        margin=dict(l=10, r=10, t=10, b=10),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption("金額為「買賣超股數 × 收盤價」估算值，非實際成交金額，僅供參考相對強弱；不含 ETF 等無產業分類的標的。")
-
-
 def _fetch_market_overview_uncached(date_str):
     try:
-        index_json = fetch_mi_index_json(date_str)
+        index_res = SESSION.get(
+            f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json",
+            headers=HEADERS, timeout=10
+        )
+        index_json = index_res.json()
         index_table = next(
             (t for t in index_json.get("tables", []) if "價格指數" in (t.get("title") or "")),
             None
@@ -238,6 +125,20 @@ def fetch_market_overview(date_str):
     if date_str == datetime.now().strftime("%Y%m%d"):
         return _fetch_market_overview_cached_short(date_str)
     return _fetch_market_overview_cached_long(date_str)
+
+
+def find_overview_trading_day(max_lookback_days=10):
+    """
+    自動找「今天如果有資料就用今天，沒有就往前找最近一個有資料的交易日」。
+    有資料的判斷標準跟 fetch_market_overview 一致：大盤指數／融資餘額／三大法人
+    三者只要有任一項不是 None，就視為當天資料已可用。
+    """
+    base_date = datetime.now()
+    for i in range(max_lookback_days):
+        date_str = (base_date - timedelta(days=i)).strftime("%Y%m%d")
+        if fetch_market_overview(date_str) is not None:
+            return date_str
+    return None
 
 
 def _fetch_overview_history_uncached(latest_date_str, trading_days=20, max_lookback_days=32):
@@ -600,79 +501,20 @@ def render_market_signal(index_change, inst_net_ntd, anomalies=None):
     )
 
 
-def find_trading_day_on_or_before(target_date, max_lookback_days=10):
-    for i in range(max_lookback_days):
-        date_str = (target_date - timedelta(days=i)).strftime("%Y%m%d")
-        day_df = fetch_day_data(date_str)
-        if day_df is not None:
-            return day_df, date_str
-    return None, None
-
-
-def fetch_week_trend(stock_code, latest_date_str, trading_days=WEEK_TRADING_DAYS, max_lookback_days=14):
-    base_date = datetime.strptime(latest_date_str, "%Y%m%d")
-    records = []
-    for i in range(max_lookback_days):
-        date_str = (base_date - timedelta(days=i)).strftime("%Y%m%d")
-        day_df = fetch_day_data(date_str)
-        if day_df is None:
-            continue
-        row = day_df[day_df["股票代號"] == stock_code]
-        if not row.empty:
-            r = row.iloc[0]
-            records.append({
-                "日期": f"{date_str[4:6]}/{date_str[6:]}",
-                "收盤價": r["收盤價"],
-                "外資買賣超(張)": r["外資買賣超"] / 1000,
-                "投信買賣超(張)": r["投信買賣超"] / 1000,
-                "自營商買賣超(張)": r["自營商買賣超"] / 1000,
-            })
-        if len(records) >= trading_days:
-            break
-    records.reverse()
-    return pd.DataFrame(records)
-
-
-def render_week_chart(trend_df):
-    bar_specs = [
-        ("外資買賣超(張)", "外資", "#e67e22"),
-        ("投信買賣超(張)", "投信", "#3498db"),
-        ("自營商買賣超(張)", "自營商", "#9b59b6"),
-    ]
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
-        row_heights=[0.55, 0.45],
-        subplot_titles=("三大法人買賣超(張)", "收盤價"),
-    )
-    for col, label, color in bar_specs:
-        fig.add_trace(
-            go.Bar(x=trend_df["日期"], y=trend_df[col], name=label, marker_color=color),
-            row=1, col=1
-        )
-    fig.add_trace(
-        go.Scatter(
-            x=trend_df["日期"], y=trend_df["收盤價"],
-            name="收盤價", mode="lines+markers", line=dict(color="#2c3e50", width=3)
-        ),
-        row=2, col=1
-    )
-    fig.update_layout(
-        barmode="group",
-        legend=dict(orientation="h", yanchor="top", y=-0.15, x=0.5, xanchor="center"),
-        height=520,
-        margin=dict(t=40, b=60),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-@st.dialog("📈 個股籌碼歷史")
-def show_stock_dialog(stock_code, stock_name, latest_date_str):
-    st.subheader(f"{stock_name}（{stock_code}）")
-    trend_df = fetch_week_trend(stock_code, latest_date_str)
-    if len(trend_df) >= 2:
-        render_week_chart(trend_df)
-    else:
-        st.warning("近期交易日資料不足，無法繪製曲線圖。")
+# -----------------------------------------------------------------------------
+# 2.5 讀取箱波均戰法選股報表（由 GitHub Actions 排程執行 auto_run.py 產生）
+# -----------------------------------------------------------------------------
+def load_latest_screener_report():
+    if not os.path.isdir(SCREENER_OUTPUT_DIR):
+        return None
+    json_files = sorted(glob.glob(os.path.join(SCREENER_OUTPUT_DIR, "results_*.json")))
+    if not json_files:
+        return None
+    try:
+        with open(json_files[-1], "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 # -----------------------------------------------------------------------------
@@ -680,29 +522,27 @@ def show_stock_dialog(stock_code, stock_name, latest_date_str):
 # -----------------------------------------------------------------------------
 st.title("📊 三大法人籌碼戰報")
 
-st.sidebar.title("⚙️ 篩選設定")
-query_date = st.sidebar.date_input("查詢日期", value=datetime.now(), max_value=datetime.now())
-query_datetime = datetime.combine(query_date, datetime.min.time())
-is_today = query_date.strftime("%Y%m%d") == datetime.now().strftime("%Y%m%d")
+trade_date = find_overview_trading_day()
 
-df, trade_date = find_trading_day_on_or_before(query_datetime)
-
-if df is not None:
+if trade_date is None:
+    st.error("⚠️ 查無近期的三大法人籌碼資料，請稍後再試。")
+else:
+    today_str = datetime.now().strftime("%Y%m%d")
     display_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-    if trade_date != query_date.strftime("%Y%m%d"):
-        st.caption(f"資料日期：{display_date}（您選擇的日期非交易日，已自動顯示最近一個交易日資料，來源：台灣證券交易所）")
+    if trade_date != today_str:
+        st.caption(f"資料日期：{display_date}（今日尚無資料，已自動顯示最近一個交易日資料，來源：台灣證券交易所）")
     else:
         st.caption(f"資料日期：{display_date}（盤後資料，來源：台灣證券交易所）")
 
     st.subheader("📌 市場總覽")
 
-    @st.fragment(run_every=10 if is_today else None)
+    @st.fragment(run_every=10)
     def render_market_overview():
         # overview 要寫在 fragment 裡面才會跟著 run_every 的定時器重跑；
-        # 寫在 fragment 外面的話，只有整頁重跑（換日期、動篩選）才會重新抓取，
-        # 10 秒的自動更新只會刷新即時指數，不會刷新這裡的資料。
+        # 寫在 fragment 外面的話只有整頁重跑才會重新抓取，10 秒的自動更新
+        # 就只會刷新即時指數，不會刷新這裡的資料。
         overview = fetch_market_overview(trade_date)
-        realtime = fetch_realtime_taiex() if is_today else None
+        realtime = fetch_realtime_taiex()
 
         # 訊號燈號／異常摘要都是根據 trade_date（三大法人資料實際涵蓋的交易日）判讀，
         # 必須跟「同一天」的大盤漲跌對照。三大法人統計要收盤後才公布，
@@ -715,7 +555,7 @@ if df is not None:
         anomalies = detect_anomalies(history_df)
 
         render_market_signal(trade_date_index_change, inst_net, anomalies)
-        if is_today and realtime and realtime["已開盤"]:
+        if realtime and realtime["已開盤"]:
             st.caption(f"🚦 訊號依 {display_date}（最近一個完整交易日）資料判讀，三大法人統計需等收盤後公布")
 
         col1, col2 = st.columns(2)
@@ -736,8 +576,7 @@ if df is not None:
                     delta=f"{taiex['漲跌點數']:+,.2f} 點（{taiex['漲跌百分比']:+.2f}%）",
                     delta_color="inverse",
                 )
-                if is_today:
-                    st.caption("尚未開盤，顯示為前一交易日收盤價與漲跌")
+                st.caption("尚未開盤，顯示為前一交易日收盤價與漲跌")
             else:
                 st.metric("大盤指數（加權指數）", "查無資料")
         with col2:
@@ -770,56 +609,136 @@ if df is not None:
 
     st.divider()
 
-    inst_type = st.sidebar.selectbox(
-        "法人別", ["三大法人合計", "外資買賣超", "投信買賣超", "自營商買賣超"]
-    )
-    top_n = st.sidebar.selectbox("顯示筆數", [10, 20, 30, 50], index=1)
-    keyword = st.sidebar.text_input("搜尋股票代號／名稱", "")
+    # ── 箱波均戰法選股結果 ──
+    st.subheader("📈 箱波均戰法選股")
+    report = load_latest_screener_report()
 
-    filtered = df
-    if keyword:
-        filtered = filtered[
-            filtered["股票代號"].str.contains(keyword, case=False, na=False)
-            | filtered["股票名稱"].str.contains(keyword, case=False, na=False)
-        ]
-
-    if "dialog_last_selection" not in st.session_state:
-        st.session_state.dialog_last_selection = {}
-
-    def render_ranking(data, ascending, table_key):
-        # key 帶入所有篩選條件，任一條件變動就視為新表格，自動清除舊的勾選
-        widget_key = f"{table_key}|{inst_type}|{top_n}|{keyword}|{trade_date}"
-        table = data.sort_values(inst_type, ascending=ascending).head(top_n).copy()
-        table["買賣超(張)"] = (table[inst_type] / 1000).round(0).astype("Int64")
-        table["收盤價_display"] = table["收盤價"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
-        table["成交量(張)"] = (table["成交股數"] / 1000).round(0).astype("Int64")
-        display_cols = ["股票代號", "股票名稱", "買賣超(張)", "收盤價_display", "成交量(張)"]
-        event = st.dataframe(
-            table[display_cols].rename(columns={"收盤價_display": "收盤價"}),
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            key=widget_key,
+    if report is None:
+        st.info("尚無選股報表，請等待排程執行後再回來查看（每個交易日收盤後自動掃描）。")
+    else:
+        screener_date = report["date"]
+        screener_display_date = f"{screener_date[:4]}-{screener_date[4:6]}-{screener_date[6:]}"
+        screener_results = report["results"]
+        st.caption(
+            f"資料日期：{screener_display_date}"
+            f"（本日共掃描 {report['total_scanned']} 檔股票，符合條件 {len(screener_results)} 檔）"
         )
-        selected_rows = event.selection.rows if event and event.selection else []
-        if selected_rows:
-            picked = table.iloc[selected_rows[0]]
-            code, name = picked["股票代號"], picked["股票名稱"]
-            # 每個表格各自記錄自己上次選取的股票，避免另一個分頁殘留的選取狀態被誤判為新選取
-            if st.session_state.dialog_last_selection.get(widget_key) != code:
-                st.session_state.dialog_last_selection[widget_key] = code
-                show_stock_dialog(code, name, trade_date)
 
-    st.caption("💡 點選下方表格中的一列，即可跳出該股票近一週的股價與法人買賣超曲線圖")
+        if not screener_results:
+            st.warning("今日無符合「週K買進中 + 日K新買進訊號」的股票。")
+        else:
+            screener_df = pd.DataFrame(screener_results)
+            screener_df["tv_link"] = "https://www.tradingview.com/chart/?symbol=TWSE%3A" + screener_df["code"]
 
-    tab_buy, tab_sell, tab_industry = st.tabs(["🟢 買超排行", "🔴 賣超排行", "🏭 產業別買賣超"])
-    with tab_buy:
-        render_ranking(filtered[filtered[inst_type] > 0], ascending=False, table_key="table_buy")
-    with tab_sell:
-        render_ranking(filtered[filtered[inst_type] < 0], ascending=True, table_key="table_sell")
-    with tab_industry:
-        render_industry_chart(df, inst_type)
+            # 舊版報表可能沒有這些欄位，補上避免後面存取出錯
+            for col in (
+                "foreign_lots", "trust_lots", "dealer_lots", "total_lots",
+                "foreign_streak", "trust_streak", "dealer_streak", "total_streak",
+            ):
+                if col not in screener_df.columns:
+                    screener_df[col] = None
 
-else:
-    st.error(f"⚠️ 查無 {query_date.strftime('%Y-%m-%d')} 前後的三大法人籌碼資料，請換一個日期再試。")
+            def _streak_label(streak):
+                if not streak:
+                    return "-"
+                direction = "買超" if streak > 0 else "賣超"
+                return f"連續{abs(int(streak))}日{direction}"
+
+            screener_df["籌碼確認"] = screener_df["total_streak"].map(_streak_label)
+
+            st.sidebar.title("⚙️ 箱波均選股篩選")
+            reason_options = sorted(screener_df["daily_buy_reason"].dropna().unique().tolist())
+            selected_reasons = st.sidebar.multiselect("日K買進原因", reason_options, default=reason_options)
+            screener_keyword = st.sidebar.text_input("搜尋股票代號／名稱", "")
+
+            inst_filter_options = {
+                "不篩選（顯示全部技術面符合的股票）": None,
+                "三大法人合計買超": "total_lots",
+                "外資買超": "foreign_lots",
+                "投信買超": "trust_lots",
+                "自營商買超": "dealer_lots",
+                "外資、投信、自營商皆買超": "__all__",
+                "三大法人合計連續買超（籌碼確認）": "__streak__",
+            }
+            selected_inst_label = st.sidebar.selectbox("法人篩選依據", list(inst_filter_options.keys()))
+            inst_key = inst_filter_options[selected_inst_label]
+
+            screener_filtered = screener_df[screener_df["daily_buy_reason"].isin(selected_reasons)]
+            if screener_keyword:
+                screener_filtered = screener_filtered[
+                    screener_filtered["code"].str.contains(screener_keyword, case=False, na=False)
+                    | screener_filtered["name"].str.contains(screener_keyword, case=False, na=False)
+                ]
+
+            if inst_key == "__all__":
+                screener_filtered = screener_filtered[
+                    (screener_filtered["foreign_lots"] > 0)
+                    & (screener_filtered["trust_lots"] > 0)
+                    & (screener_filtered["dealer_lots"] > 0)
+                ]
+            elif inst_key == "__streak__":
+                screener_filtered = screener_filtered[screener_filtered["total_streak"] > 0]
+            elif inst_key is not None:
+                screener_filtered = screener_filtered[screener_filtered[inst_key] > 0]
+
+            screener_inst_date = screener_results[0].get("inst_date") if screener_results else None
+            if screener_inst_date:
+                screener_inst_display_date = (
+                    f"{screener_inst_date[:4]}-{screener_inst_date[4:6]}-{screener_inst_date[6:]}"
+                )
+                st.caption(f"三大法人買賣超資料日期：{screener_inst_display_date}（僅涵蓋上市股票）")
+
+            screener_display_cols = {
+                "code": "代號",
+                "name": "名稱",
+                "market": "市場",
+                "close": "收盤價",
+                "change_pct": "漲跌幅(%)",
+                "volume_lots": "成交量(張)",
+                "daily_buy_reason": "日K買進原因",
+                "daily_trend_text": "日K趨勢",
+                "weekly_trend_text": "週K趨勢",
+                "foreign_lots": "外資買賣超(張)",
+                "trust_lots": "投信買賣超(張)",
+                "dealer_lots": "自營商買賣超(張)",
+                "total_lots": "三大法人合計(張)",
+                "籌碼確認": "籌碼確認",
+                "tv_link": "TradingView",
+            }
+            screener_table = screener_filtered[list(screener_display_cols.keys())].rename(columns=screener_display_cols)
+
+            st.dataframe(
+                screener_table,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "收盤價": st.column_config.NumberColumn(format="%.2f"),
+                    "漲跌幅(%)": st.column_config.NumberColumn(format="%.2f%%"),
+                    "外資買賣超(張)": st.column_config.NumberColumn(format="%d"),
+                    "投信買賣超(張)": st.column_config.NumberColumn(format="%d"),
+                    "自營商買賣超(張)": st.column_config.NumberColumn(format="%d"),
+                    "三大法人合計(張)": st.column_config.NumberColumn(format="%d"),
+                    "TradingView": st.column_config.LinkColumn(display_text="看圖"),
+                },
+            )
+
+            st.caption(f"共 {len(screener_table)} 檔符合篩選條件（技術面符合 {len(screener_df)} 檔）")
+
+            st.divider()
+            st.subheader("📥 下載選股原始報表")
+            col1, col2 = st.columns(2)
+            for col, ext, label, mime in (
+                (col1, "html", "HTML 報表", "text/html"),
+                (col2, "xlsx", "Excel 報表", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            ):
+                screener_report_path = os.path.join(SCREENER_OUTPUT_DIR, f"report_{screener_date}.{ext}")
+                if os.path.exists(screener_report_path):
+                    with open(screener_report_path, "rb") as f:
+                        col.download_button(
+                            f"下載{label}",
+                            data=f.read(),
+                            file_name=f"report_{screener_date}.{ext}",
+                            mime=mime,
+                        )
+                else:
+                    col.caption(f"{label}不存在")
