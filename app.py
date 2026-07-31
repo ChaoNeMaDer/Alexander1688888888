@@ -44,6 +44,17 @@ def to_num(value):
 #    以單一交易日為單位快取，主排行榜與週曲線圖共用同一份快取
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
+def fetch_mi_index_json(date_str):
+    # MI_INDEX 同時含「每日收盤行情」（個股）與「價格指數」（大盤）兩張表，
+    # fetch_day_data 和 _fetch_market_overview_uncached 都要用到，共用同一份快取避免重複打 API
+    res = SESSION.get(
+        f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json",
+        headers=HEADERS, timeout=10
+    )
+    return res.json()
+
+
+@st.cache_data(ttl=3600)
 def fetch_day_data(date_str):
     try:
         inst_res = SESSION.get(
@@ -54,11 +65,7 @@ def fetch_day_data(date_str):
         if inst_json.get("stat") != "OK" or not inst_json.get("data"):
             return None
 
-        price_res = SESSION.get(
-            f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json",
-            headers=HEADERS, timeout=10
-        )
-        price_json = price_res.json()
+        price_json = fetch_mi_index_json(date_str)
         price_table = next(
             (t for t in price_json.get("tables", []) if "每日收盤行情" in (t.get("title") or "")),
             None
@@ -156,11 +163,7 @@ def render_industry_chart(df, inst_type):
 
 def _fetch_market_overview_uncached(date_str):
     try:
-        index_res = SESSION.get(
-            f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALLBUT0999&response=json",
-            headers=HEADERS, timeout=10
-        )
-        index_json = index_res.json()
+        index_json = fetch_mi_index_json(date_str)
         index_table = next(
             (t for t in index_json.get("tables", []) if "價格指數" in (t.get("title") or "")),
             None
@@ -237,8 +240,7 @@ def fetch_market_overview(date_str):
     return _fetch_market_overview_cached_long(date_str)
 
 
-@st.cache_data(ttl=3600)
-def fetch_overview_history(latest_date_str, trading_days=20, max_lookback_days=32):
+def _fetch_overview_history_uncached(latest_date_str, trading_days=20, max_lookback_days=32):
     base_date = datetime.strptime(latest_date_str, "%Y%m%d")
     date_strs = [(base_date - timedelta(days=i)).strftime("%Y%m%d") for i in range(max_lookback_days)]
 
@@ -260,6 +262,24 @@ def fetch_overview_history(latest_date_str, trading_days=20, max_lookback_days=3
             break
     records.reverse()
     return pd.DataFrame(records)
+
+
+@st.cache_data(ttl=3600)
+def _fetch_overview_history_cached_long(latest_date_str, trading_days=20, max_lookback_days=32):
+    return _fetch_overview_history_uncached(latest_date_str, trading_days, max_lookback_days)
+
+
+@st.cache_data(ttl=300)
+def _fetch_overview_history_cached_short(latest_date_str, trading_days=20, max_lookback_days=32):
+    return _fetch_overview_history_uncached(latest_date_str, trading_days, max_lookback_days)
+
+
+def fetch_overview_history(latest_date_str, trading_days=20, max_lookback_days=32):
+    # 跟 fetch_market_overview 用一樣的今日短快取／非今日長快取邏輯，
+    # 避免「總覽已經有今天的融資餘額，異常摘要卻還當作今天沒資料」的不同步狀況。
+    if latest_date_str == datetime.now().strftime("%Y%m%d"):
+        return _fetch_overview_history_cached_short(latest_date_str, trading_days, max_lookback_days)
+    return _fetch_overview_history_cached_long(latest_date_str, trading_days, max_lookback_days)
 
 
 def _compute_streak(series, min_days):
@@ -674,12 +694,14 @@ if df is not None:
     else:
         st.caption(f"資料日期：{display_date}（盤後資料，來源：台灣證券交易所）")
 
-    overview = fetch_market_overview(trade_date)
-
     st.subheader("📌 市場總覽")
 
     @st.fragment(run_every=10 if is_today else None)
     def render_market_overview():
+        # overview 要寫在 fragment 裡面才會跟著 run_every 的定時器重跑；
+        # 寫在 fragment 外面的話，只有整頁重跑（換日期、動篩選）才會重新抓取，
+        # 10 秒的自動更新只會刷新即時指數，不會刷新這裡的資料。
+        overview = fetch_market_overview(trade_date)
         realtime = fetch_realtime_taiex() if is_today else None
 
         # 訊號燈號／異常摘要都是根據 trade_date（三大法人資料實際涵蓋的交易日）判讀，
