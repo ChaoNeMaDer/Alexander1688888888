@@ -8,6 +8,7 @@ import sys
 import json
 import glob
 import logging
+from collections import Counter
 from datetime import datetime
 
 # 設定工作目錄為腳本所在位置
@@ -76,6 +77,16 @@ def main():
         inst_history, _ = data_fetcher.fetch_institutional_flows_history(config.INST_STREAK_TRADING_DAYS)
         logging.info(f"三大法人歷史資料涵蓋 {len(inst_history)} 檔（近 {config.INST_STREAK_TRADING_DAYS} 個交易日）")
 
+        # 三大法人資料（T86）的日期是靠 TWSE 是否已公布來判斷，天生就會正確跳過假日；
+        # 拿它來檢查 yfinance 股價資料是否落後，比自己猜測日曆假日可靠。
+        price_dates = Counter(df.index[-1].strftime("%Y%m%d") for df in daily_data.values())
+        latest_price_date = price_dates.most_common(1)[0][0] if price_dates else None
+        if inst_date and latest_price_date and latest_price_date < inst_date:
+            logging.warning(
+                f"股價資料最新日期（{latest_price_date}）早於三大法人資料日期（{inst_date}），"
+                f"yfinance 資料可能延遲更新，本次掃描的漲跌幅／買進訊號可能不是最新交易日的資料"
+            )
+
         # ── Step 3: 掃描 ──
         results = []
         skipped = 0
@@ -94,6 +105,11 @@ def main():
                 )
 
                 if w_result is None or w_result["last_sig"] != 1:
+                    continue
+
+                if w_result["trend_code"] not in (1, 2):
+                    # 狀態機仍停在買進（還沒觸發明確賣出訊號），但週K均線排列
+                    # 已經轉弱成糾結/中性/空頭 → 視為趨勢已經鬆動，不放行
                     continue
 
                 d_result = boxwave_engine.calc_signal_and_trend(
