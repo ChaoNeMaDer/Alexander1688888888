@@ -30,6 +30,9 @@ MIN_VOLUME_LOTS = 1000      # 最低成交量（張）
 MIN_VOLUME_SHARES = MIN_VOLUME_LOTS * 1000  # 轉換為股數
 MAX_PRICE = 500             # 最高股價（元），超過此價格的股票不列入
 
+# --- 三大法人連續買賣超天數（籌碼面確認標籤，非篩選門檻）---
+INST_STREAK_TRADING_DAYS = 10  # 回看的交易日數
+
 # --- 資料下載設定 ---
 DOWNLOAD_PERIOD = "2y"      # 日K 歷史資料長度（需涵蓋 MA240）
 DOWNLOAD_BATCH_SIZE = 30    # 每批下載的股票數量

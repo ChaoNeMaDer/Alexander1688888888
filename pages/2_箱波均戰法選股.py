@@ -58,9 +58,20 @@ else:
         df["tv_link"] = "https://www.tradingview.com/chart/?symbol=TWSE%3A" + df["code"]
 
         # 舊版報表可能沒有三大法人欄位，補上避免後面存取出錯
-        for col in ("foreign_lots", "trust_lots", "dealer_lots", "total_lots"):
+        for col in (
+            "foreign_lots", "trust_lots", "dealer_lots", "total_lots",
+            "foreign_streak", "trust_streak", "dealer_streak", "total_streak",
+        ):
             if col not in df.columns:
                 df[col] = None
+
+        def _streak_label(streak):
+            if not streak:
+                return "-"
+            direction = "買超" if streak > 0 else "賣超"
+            return f"連續{abs(int(streak))}日{direction}"
+
+        df["籌碼確認"] = df["total_streak"].map(_streak_label)
 
         st.sidebar.title("⚙️ 篩選設定")
         reason_options = sorted(df["daily_buy_reason"].dropna().unique().tolist())
@@ -74,6 +85,7 @@ else:
             "投信買超": "trust_lots",
             "自營商買超": "dealer_lots",
             "外資、投信、自營商皆買超": "__all__",
+            "三大法人合計連續買超（籌碼確認）": "__streak__",
         }
         selected_inst_label = st.sidebar.selectbox("法人篩選依據", list(inst_filter_options.keys()))
         inst_key = inst_filter_options[selected_inst_label]
@@ -89,6 +101,8 @@ else:
             filtered = filtered[
                 (filtered["foreign_lots"] > 0) & (filtered["trust_lots"] > 0) & (filtered["dealer_lots"] > 0)
             ]
+        elif inst_key == "__streak__":
+            filtered = filtered[filtered["total_streak"] > 0]
         elif inst_key is not None:
             filtered = filtered[filtered[inst_key] > 0]
 
@@ -111,6 +125,7 @@ else:
             "trust_lots": "投信買賣超(張)",
             "dealer_lots": "自營商買賣超(張)",
             "total_lots": "三大法人合計(張)",
+            "籌碼確認": "籌碼確認",
             "tv_link": "TradingView",
         }
         table = filtered[list(display_cols.keys())].rename(columns=display_cols)

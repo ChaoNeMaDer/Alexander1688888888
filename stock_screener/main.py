@@ -43,6 +43,7 @@ def main():
 
     # ── Step 2.5: 取得三大法人買賣超（全市場一次性資料，用股票代號查表）──
     inst_flows, inst_date = data_fetcher.fetch_institutional_flows()
+    inst_history, _ = data_fetcher.fetch_institutional_flows_history(config.INST_STREAK_TRADING_DAYS)
 
     # ── Step 3: 掃描每檔股票 ──
     results = []
@@ -109,6 +110,13 @@ def main():
             dealer_lots = flow["dealer_net"] // 1000 if flow else None
             total_lots = flow["total_net"] // 1000 if flow else None
 
+            # 連續買超/賣超天數（籌碼面確認標籤，不影響技術面篩選結果）
+            hist = inst_history.get(code, [])
+            foreign_streak = data_fetcher.compute_streak([h["foreign_net"] for h in hist])
+            trust_streak = data_fetcher.compute_streak([h["trust_net"] for h in hist])
+            dealer_streak = data_fetcher.compute_streak([h["dealer_net"] for h in hist])
+            total_streak = data_fetcher.compute_streak([h["total_net"] for h in hist])
+
             results.append({
                 "code": code,
                 "name": info.get("name", ""),
@@ -127,6 +135,10 @@ def main():
                 "trust_lots": trust_lots,
                 "dealer_lots": dealer_lots,
                 "total_lots": total_lots,
+                "foreign_streak": foreign_streak,
+                "trust_streak": trust_streak,
+                "dealer_streak": dealer_streak,
+                "total_streak": total_streak,
             })
 
         except Exception as e:

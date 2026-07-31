@@ -72,9 +72,41 @@ def get_stock_list():
     return stocks
 
 
+def _fetch_t86_day(date_str):
+    """抓單一交易日的 T86 三大法人買賣超，查無資料（非交易日/尚未公布）回傳 None。"""
+    try:
+        resp = requests.get(
+            f"https://www.twse.com.tw/rwd/zh/fund/T86?response=json&date={date_str}&selectType=ALL",
+            timeout=30
+        )
+        data = resp.json()
+    except Exception as e:
+        print(f"  ⚠️ {date_str} 三大法人資料取得失敗: {e}")
+        return None
+
+    if data.get("stat") != "OK" or not data.get("data"):
+        return None
+
+    flows = {}
+    for row in data["data"]:
+        rec = dict(zip(data["fields"], row))
+        code = rec.get("證券代號", "").strip()
+
+        def _n(key):
+            return _safe_float(rec.get(key, "0"))
+
+        flows[code] = {
+            "foreign_net": _n("外陸資買賣超股數(不含外資自營商)") + _n("外資自營商買賣超股數"),
+            "trust_net": _n("投信買賣超股數"),
+            "dealer_net": _n("自營商買賣超股數"),
+            "total_net": _n("三大法人買賣超股數"),
+        }
+    return flows
+
+
 def fetch_institutional_flows(max_lookback_days=5):
     """
-    抓 TWSE 三大法人買賣超日報（T86），全市場一天只需一次 API 呼叫。
+    抓 TWSE 三大法人買賣超日報（T86）最近一個交易日的資料，全市場一天只需一次 API 呼叫。
     自動往前找最近一個有資料的交易日（今天若尚未收盤/未公布則往前找）。
     只涵蓋上市（TWSE）股票，回傳 (flows, date_str)：
         flows: { 股票代號: {foreign_net, trust_net, dealer_net, total_net} }（單位：股）
@@ -83,38 +115,62 @@ def fetch_institutional_flows(max_lookback_days=5):
     base_date = datetime.now()
     for i in range(max_lookback_days):
         date_str = (base_date - timedelta(days=i)).strftime("%Y%m%d")
-        try:
-            resp = requests.get(
-                f"https://www.twse.com.tw/rwd/zh/fund/T86?response=json&date={date_str}&selectType=ALL",
-                timeout=30
-            )
-            data = resp.json()
-        except Exception as e:
-            print(f"  ⚠️ {date_str} 三大法人資料取得失敗: {e}")
-            continue
-
-        if data.get("stat") != "OK" or not data.get("data"):
-            continue
-
-        flows = {}
-        for row in data["data"]:
-            rec = dict(zip(data["fields"], row))
-            code = rec.get("證券代號", "").strip()
-
-            def _n(key):
-                return _safe_float(rec.get(key, "0"))
-
-            flows[code] = {
-                "foreign_net": _n("外陸資買賣超股數(不含外資自營商)") + _n("外資自營商買賣超股數"),
-                "trust_net": _n("投信買賣超股數"),
-                "dealer_net": _n("自營商買賣超股數"),
-                "total_net": _n("三大法人買賣超股數"),
-            }
-        print(f"  ✅ 三大法人資料日期: {date_str}（共 {len(flows)} 檔）")
-        return flows, date_str
+        flows = _fetch_t86_day(date_str)
+        if flows is not None:
+            print(f"  ✅ 三大法人資料日期: {date_str}（共 {len(flows)} 檔）")
+            return flows, date_str
 
     print("  ❌ 找不到近期三大法人資料")
     return {}, None
+
+
+def fetch_institutional_flows_history(trading_days=10, max_lookback_days=25):
+    """
+    抓最近 N 個交易日的三大法人買賣超（T86），建立每檔股票的歷史序列，
+    用來計算「連續買超/賣超天數」等籌碼面確認訊號。
+
+    回傳 (history, date_strs)：
+        history: { 股票代號: [ {foreign_net, trust_net, dealer_net, total_net}, ... ] }
+                  串列由舊到新排序，長度 <= trading_days
+        date_strs: 對應的交易日 (YYYYMMDD)，由舊到新排序
+    """
+    base_date = datetime.now()
+    days_data = []  # [(date_str, flows)]，由新到舊
+    for i in range(max_lookback_days):
+        date_str = (base_date - timedelta(days=i)).strftime("%Y%m%d")
+        flows = _fetch_t86_day(date_str)
+        if flows is None:
+            continue
+        days_data.append((date_str, flows))
+        if len(days_data) >= trading_days:
+            break
+
+    days_data.reverse()  # 由舊到新，方便算連續天數
+    history = {}
+    for _, flows in days_data:
+        for code, rec in flows.items():
+            history.setdefault(code, []).append(rec)
+    return history, [d for d, _ in days_data]
+
+
+def compute_streak(net_values):
+    """
+    計算「連續同向」天數。net_values 為淨買賣超（股數，可正可負），由舊到新排列。
+    回傳帶正負號的整數：+N 代表連續 N 個交易日淨買超，-N 代表連續 N 個交易日淨賣超，
+    最新一天為 0（無淨額）或資料不足則回傳 0。
+    """
+    if not net_values:
+        return 0
+    sign = 1 if net_values[-1] > 0 else -1 if net_values[-1] < 0 else 0
+    if sign == 0:
+        return 0
+    streak = 0
+    for v in reversed(net_values):
+        v_sign = 1 if v > 0 else -1 if v < 0 else 0
+        if v_sign != sign:
+            break
+        streak += 1
+    return streak * sign
 
 
 def download_historical(tickers, period=None, max_retries=3):
