@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>箱波均選股結果 — 2026-09-01 12:19</title>
+<title>箱波均選股結果 — 2026-09-02 11:56</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -174,20 +174,20 @@ tr:hover { background: rgba(240,185,11,0.04); }
 <div class="container">
   <div class="header">
     <h1>📊 箱波均戰法 — 選股結果</h1>
-    <div class="subtitle">掃描時間：2026-09-01 12:19　|　篩選條件：週K已買進 + 日K當日新買進訊號　|　成交量 ≥ 1000 張　|　股價 ≤ 500 元</div>
+    <div class="subtitle">掃描時間：2026-09-02 11:56　|　篩選條件：週K已買進 + 日K當日新買進訊號　|　成交量 ≥ 1000 張　|　股價 ≤ 500 元</div>
   </div>
 
   <div class="stats">
     <div class="stat-card">
-      <div class="value">358</div>
+      <div class="value">348</div>
       <div class="label">掃描股票數</div>
     </div>
     <div class="stat-card">
-      <div class="value" style="color:#26a69a">0</div>
+      <div class="value" style="color:#26a69a">2</div>
       <div class="label">符合條件</div>
     </div>
     <div class="stat-card">
-      <div class="value" style="color:#42a5f5">0</div>
+      <div class="value" style="color:#42a5f5">2</div>
       <div class="label">上市</div>
     </div>
     <div class="stat-card">
@@ -197,7 +197,44 @@ tr:hover { background: rgba(240,185,11,0.04); }
   </div>
 
   <div class="table-wrapper">
-    <p class='no-results'>🔍 今日無符合條件的股票</p>
+    
+    <table id="resultTable">
+      <thead>
+        <tr>
+          <th>#</th><th>代碼</th><th>名稱</th><th>市場</th>
+          <th>收盤價</th><th>漲跌幅</th><th>成交量(張)</th>
+          <th>日K買進原因</th><th>日K均線狀態</th>
+          <th>週K買進原因</th><th>週K均線狀態</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td><a href="https://www.tradingview.com/chart/?symbol=TWSE%3A2464" target="_blank" class="stock-link">2464</a></td>
+          <td>盟立</td>
+          <td><span class="badge badge-twse">TWSE</span></td>
+          <td style="color:#26a69a;font-weight:600">202.00</td>
+          <td style="color:#26a69a;font-weight:600">+9.77%</td>
+          <td>27,586</td>
+          <td><span class="badge badge-buy">過而不破</span></td>
+          <td><span class="trend trend-bull">📈 多頭排列</span></td>
+          <td><span class="badge badge-buy-dim">過而不破</span></td>
+          <td><span class="trend trend-bull">📈 多頭排列</span></td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td><a href="https://www.tradingview.com/chart/?symbol=TWSE%3A4904" target="_blank" class="stock-link">4904</a></td>
+          <td>遠傳</td>
+          <td><span class="badge badge-twse">TWSE</span></td>
+          <td style="color:#26a69a;font-weight:600">102.50</td>
+          <td style="color:#26a69a;font-weight:600">+1.49%</td>
+          <td>9,672</td>
+          <td><span class="badge badge-buy">出水芙蓉</span></td>
+          <td><span class="trend trend-bear">📉 短空</span></td>
+          <td><span class="badge badge-buy-dim"></span></td>
+          <td><span class="trend trend-bull">📈 多頭排列</span></td>
+        </tr></tbody>
+    </table>
   </div>
 
   <div class="footer">
